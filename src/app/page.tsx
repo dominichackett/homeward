@@ -54,13 +54,16 @@ export default function Home() {
             <span className="text-xs text-cyan-100 mt-1">Open Camera & Scan Privately</span>
           </Link>
 
-          <div className="p-5 rounded-2xl bg-slate-900 border border-slate-800/80 text-slate-300 flex flex-col items-center text-center justify-center opacity-70">
-            <div className="w-12 h-12 rounded-xl bg-slate-800 flex items-center justify-center mb-3">
-              <UserPlus className="w-6 h-6 text-slate-400" />
+          <Link
+            href="/dashboard"
+            className="group p-5 rounded-2xl bg-slate-900 hover:bg-slate-850 border border-slate-800 text-slate-300 hover:border-cyan-500/40 hover:scale-[1.02] active:scale-[0.99] transition-all flex flex-col items-center text-center justify-center"
+          >
+            <div className="w-12 h-12 rounded-xl bg-slate-800 group-hover:bg-cyan-950/60 flex items-center justify-center mb-3 group-hover:text-cyan-400 transition-colors">
+              <UserPlus className="w-6 h-6 text-slate-400 group-hover:text-cyan-400" />
             </div>
-            <span className="font-bold text-lg text-slate-200">Caregiver Enrollment</span>
-            <span className="text-xs text-slate-400 mt-1">Enroll a Loved One (Coming Next)</span>
-          </div>
+            <span className="font-bold text-lg text-slate-200 group-hover:text-white">Caregiver Portal</span>
+            <span className="text-xs text-slate-400 mt-1">Enroll & Manage Loved Ones</span>
+          </Link>
         </div>
 
         {/* Privacy Note */}
