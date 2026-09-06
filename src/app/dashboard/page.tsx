@@ -733,7 +733,13 @@ export default function CaregiverDashboard() {
 
               <div className="flex items-center justify-between text-xs text-slate-500 pt-2 border-t border-slate-850">
                 <span className="font-mono text-[10px]">CRE Execution ID: 0x9f1a...c842</span>
-                <span className="text-[11px] text-slate-400">Case closed by Guardian</span>
+                <Link
+                  href="/alert/case-hw-8492"
+                  className="inline-flex items-center gap-1 text-xs text-cyan-400 hover:text-cyan-300 font-semibold"
+                >
+                  <span>View Alert Resolution Mockup</span>
+                  <ArrowRight className="w-3 h-3" />
+                </Link>
               </div>
             </div>
           </div>
