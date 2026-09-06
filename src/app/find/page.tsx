@@ -19,8 +19,15 @@ import {
   Flame,
   AlertTriangle,
   ScanFace,
-  XCircle
+  XCircle,
+  ExternalLink
 } from "lucide-react";
+import {
+  IDKitRequestWidget,
+  selfieCheckLegacy,
+  type RpContext,
+  type IDKitResult,
+} from "@worldcoin/idkit";
 
 type FlowStep = "camera" | "preview" | "world_id" | "processing" | "confirmed";
 
@@ -39,6 +46,13 @@ export default function FindScreen() {
   const [cameraError, setCameraError] = useState<string | null>(null);
   const [processingStage, setProcessingStage] = useState(1);
   const [worldIdStatus, setWorldIdStatus] = useState<"idle" | "verifying" | "throttled">("idle");
+
+  // World ID v4 state
+  const [isIdKitOpen, setIsIdKitOpen] = useState(false);
+  const [rpContext, setRpContext] = useState<RpContext | null>(null);
+  const [verifiedNullifier, setVerifiedNullifier] = useState<string | null>(null);
+  const [worldIdError, setWorldIdError] = useState<string | null>(null);
+  const [worldIdNotice, setWorldIdNotice] = useState<string | null>(null);
 
   // face-api.js state
   const [modelsLoaded, setModelsLoaded] = useState(false);
@@ -110,7 +124,7 @@ export default function FindScreen() {
         })
         .catch(() => {
           setIsStreaming(false);
-          setCameraError("Camera unavailable or permission denied. You can select or test a photo below.");
+          setCameraError("Camera unavailable or permission denied. You can select or take a photo below.");
         });
     }
 
@@ -131,7 +145,7 @@ export default function FindScreen() {
       setIsDetecting(false);
       setDetection({
         detected: false,
-        error: "Face AI engine is initializing. Please wait 2 seconds and try again.",
+        error: "Face AI engine is initializing. Please wait a moment and try again.",
       });
       return;
     }
@@ -239,7 +253,7 @@ export default function FindScreen() {
         runFaceDetection(dataUrl);
       }
     } else {
-      // If camera is not streaming, open system camera / photo picker
+      // If camera is not streaming, open native camera/photo picker
       fileInputRef.current?.click();
     }
   };
@@ -259,14 +273,100 @@ export default function FindScreen() {
     }
   };
 
-  // World ID Verification Simulation
-  const handleVerifyWorldId = () => {
+  // 4. Trigger Real World ID Verification Flow (IDKit v4)
+  const handleTriggerWorldId = async () => {
     setWorldIdStatus("verifying");
-    setTimeout(() => {
+    setWorldIdError(null);
+    setWorldIdNotice(null);
+
+    // If valid signature already generated and unexpired, open modal directly
+    const now = Math.floor(Date.now() / 1000);
+    if (rpContext && rpContext.expires_at > now + 60) {
+      setIsIdKitOpen(true);
+      return;
+    }
+
+    try {
+      // Step 3 from World ID SKILL: Generate RP signature in backend
+      const res = await fetch("/api/world-id/rp-signature", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ action: process.env.NEXT_PUBLIC_WLD_ACTION || "finder-report" }),
+      });
+      const data = await res.json();
+      if (!res.ok || data.error) {
+        throw new Error(data.error || "Failed to generate RP signature from server");
+      }
+
+      setRpContext({
+        rp_id: data.rp_id,
+        nonce: data.nonce,
+        created_at: data.created_at,
+        expires_at: data.expires_at,
+        signature: data.sig,
+      });
+
+      // Step 4: Open IDKit widget
+      setIsIdKitOpen(true);
+    } catch (err) {
+      console.error("Failed to initialize World ID:", err);
+      setWorldIdError(err instanceof Error ? err.message : "Error initializing World ID");
       setWorldIdStatus("idle");
-      setCurrentStep("processing");
-      startSimulatedProcessing();
-    }, 1200);
+    }
+  };
+
+  // Handle widget open/close event (e.g., user closes QR modal or dismisses without verifying)
+  const handleOpenChange = (open: boolean) => {
+    setIsIdKitOpen(open);
+    if (!open) {
+      setWorldIdStatus("idle");
+      // If proof has not verified yet and user is still on World ID step
+      if (!verifiedNullifier && currentStep === "world_id") {
+        setWorldIdNotice(
+          "World ID verification was not completed. Verification is required to protect vulnerable persons against mass-probing. You can reopen the QR code to verify or go back."
+        );
+      }
+    } else {
+      setWorldIdNotice(null);
+      setWorldIdError(null);
+    }
+  };
+
+  // Step 5: Backend Proof Verification
+  const handleProofVerify = async (result: IDKitResult) => {
+    const res = await fetch("/api/world-id/verify-proof", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        idkitResponse: result,
+      }),
+    });
+
+    if (res.status === 429) {
+      const errData = await res.json();
+      setWorldIdStatus("throttled");
+      throw new Error(errData.message || "Rate limit reached for this nullifier");
+    }
+
+    if (!res.ok) {
+      const errData = await res.json().catch(() => ({}));
+      throw new Error(errData.error || "Backend verification failed");
+    }
+
+    const verifyData = await res.json();
+    if (verifyData.nullifier) {
+      setVerifiedNullifier(verifyData.nullifier);
+    }
+  };
+
+  // Step 6: On Verified Success, proceed to Confidential CRE Enclave Matching
+  const handleProofSuccess = (result: IDKitResult) => {
+    setIsIdKitOpen(false);
+    setWorldIdStatus("idle");
+    setWorldIdNotice(null);
+    setWorldIdError(null);
+    setCurrentStep("processing");
+    startSimulatedProcessing();
   };
 
   // Chainlink CRE TEE Confidential Workflow Simulation
@@ -285,6 +385,10 @@ export default function FindScreen() {
     setCurrentStep("camera");
     setProcessingStage(1);
     setWorldIdStatus("idle");
+    setVerifiedNullifier(null);
+    setWorldIdError(null);
+    setWorldIdNotice(null);
+    setIsIdKitOpen(false);
   };
 
   return (
@@ -342,7 +446,7 @@ export default function FindScreen() {
         {currentStep === "camera" && (
           <div className="flex flex-col items-center animate-fade-in">
             {/* Viewfinder Card */}
-            <div className="relative w-full aspect-[3/4] max-h-[460px] rounded-3xl overflow-hidden bg-slate-900 border-2 border-slate-800 shadow-2xl shadow-cyan-950/30 flex items-center justify-center">
+            <div className="relative w-full aspect-[3/4] max-h-[500px] rounded-3xl overflow-hidden bg-slate-900 border-2 border-slate-800 shadow-2xl shadow-cyan-950/30 flex items-center justify-center">
               {/* Video Element for live stream */}
               <video
                 ref={videoRef}
@@ -360,9 +464,9 @@ export default function FindScreen() {
                   <div className="w-20 h-20 rounded-full bg-slate-800/80 border border-slate-700 flex items-center justify-center mb-4 text-slate-400 animate-pulse">
                     <Camera className="w-10 h-10" />
                   </div>
-                  <p className="text-sm font-semibold text-slate-200">Camera Viewfinder</p>
+                  <p className="text-sm font-semibold text-slate-200">Point & Shoot Camera</p>
                   <p className="text-xs text-slate-500 mt-1 max-w-[260px]">
-                    {cameraError || "Point camera at the person's face."}
+                    {cameraError || "Point camera at the person. face-api.js scans the full frame."}
                   </p>
                 </div>
               )}
@@ -412,7 +516,7 @@ export default function FindScreen() {
                 className="flex-1 flex items-center justify-center gap-2 py-4 px-6 rounded-2xl bg-gradient-to-r from-cyan-500 to-blue-600 hover:from-cyan-400 hover:to-blue-500 text-white font-semibold text-base shadow-lg shadow-cyan-500/25 active:scale-[0.98] transition-all disabled:opacity-50"
               >
                 <Camera className="w-5 h-5" />
-                <span>{isStreaming ? "Take Photo" : "Take Test Photo"}</span>
+                <span>{isStreaming ? "Take Photo" : "Take Photo / Pick File"}</span>
               </button>
             </div>
           </div>
@@ -544,7 +648,7 @@ export default function FindScreen() {
           </div>
         )}
 
-        {/* ==================== STATE 3: WORLD ID GATE MODAL ==================== */}
+        {/* ==================== STATE 3: WORLD ID GATE SCREEN ==================== */}
         {currentStep === "world_id" && (
           <div className="w-full bg-slate-900 border border-slate-800 rounded-3xl p-6 shadow-2xl animate-fade-in flex flex-col items-center text-center">
             {/* World ID Orb Header */}
@@ -561,18 +665,38 @@ export default function FindScreen() {
               World ID Selfie Check
             </h2>
             <p className="text-xs font-medium uppercase tracking-widest text-cyan-400 mt-1">
-              Human Abuse Prevention Gate
+              Abuse Prevention & Sybil Resistance
             </p>
 
             <p className="text-xs text-slate-400 mt-3 leading-relaxed max-w-sm">
-              To prevent automated bots, mass scraping, and prank probes against vulnerable persons, please verify your uniqueness with World ID.
+              To prevent automated bots, mass scraping, and prank reports against vulnerable persons, verify your human uniqueness with World ID.
             </p>
 
-            {/* Throttled status banner */}
+            {/* Error or Throttling Banner */}
             {worldIdStatus === "throttled" && (
               <div className="mt-4 p-3 rounded-xl bg-amber-950/60 border border-amber-800 text-amber-300 text-xs flex items-center gap-2 text-left w-full">
                 <Flame className="w-4 h-4 shrink-0 text-amber-400" />
-                <span>Rate limit reached for this nullifier. Please wait 10 minutes before reporting again.</span>
+                <span>Rate limit reached for this nullifier. Reports are throttled to prevent mass-probing.</span>
+              </div>
+            )}
+
+            {worldIdError && (
+              <div className="mt-4 p-3.5 rounded-2xl bg-red-950/60 border border-red-800 text-red-300 text-xs flex items-center gap-2.5 text-left w-full">
+                <AlertCircle className="w-4 h-4 shrink-0 text-red-400" />
+                <span>{worldIdError}</span>
+              </div>
+            )}
+
+            {/* Notice Banner when user closes QR without verifying */}
+            {worldIdNotice && !worldIdError && worldIdStatus !== "throttled" && (
+              <div className="mt-4 p-3.5 rounded-2xl bg-slate-950/90 border border-amber-500/50 text-left w-full space-y-1.5 animate-fade-in">
+                <div className="flex items-center gap-2 text-amber-400 font-semibold text-xs">
+                  <AlertTriangle className="w-4 h-4 shrink-0 text-amber-400" />
+                  <span>Verification Not Completed</span>
+                </div>
+                <p className="text-slate-300 text-[11px] leading-relaxed pl-6">
+                  {worldIdNotice}
+                </p>
               </div>
             )}
 
@@ -583,47 +707,71 @@ export default function FindScreen() {
                 <span>Zero-Knowledge Proof Guarantee</span>
               </div>
               <p className="text-slate-400 text-[11px] leading-normal pl-5.5">
-                World ID does not share your real name or personal information. It only asserts you are a real, distinct human reporter.
+                World ID does not share your real name or personal information. It generates a zero-knowledge proof proving you are a unique living human.
               </p>
             </div>
 
+            {/* Live World ID Widget */}
+            {rpContext && (
+              <IDKitRequestWidget
+                open={isIdKitOpen}
+                onOpenChange={handleOpenChange}
+                app_id={(process.env.NEXT_PUBLIC_WLD_APP_ID || "app_5ebf986494a7a5cff54fe723b25ff976") as `app_${string}`}
+                action={process.env.NEXT_PUBLIC_WLD_ACTION || "finder-report"}
+                rp_context={rpContext}
+                allow_legacy_proofs={true}
+                preset={selfieCheckLegacy()}
+                handleVerify={handleProofVerify}
+                onSuccess={handleProofSuccess}
+                onError={(errorCode) => {
+                  console.warn("IDKit error code:", errorCode);
+                  setIsIdKitOpen(false);
+                  setWorldIdStatus("idle");
+                  if (errorCode === "user_rejected") {
+                    setWorldIdNotice(
+                      "Verification was declined or cancelled in the World App. You can reopen the QR code whenever you are ready."
+                    );
+                  } else {
+                    setWorldIdError(`World ID verification error (${errorCode})`);
+                  }
+                }}
+              />
+            )}
+
             {/* Actions */}
             <div className="mt-6 w-full flex flex-col gap-2.5">
+              {/* Primary: Open Official World ID IDKit Widget */}
               <button
-                onClick={handleVerifyWorldId}
+                onClick={handleTriggerWorldId}
                 disabled={worldIdStatus === "verifying"}
                 className="w-full flex items-center justify-center gap-2 py-3.5 px-4 rounded-2xl bg-white text-slate-950 hover:bg-slate-200 font-bold text-sm shadow-lg transition-all active:scale-[0.99] disabled:opacity-50"
               >
                 {worldIdStatus === "verifying" ? (
                   <>
                     <RefreshCw className="w-4 h-4 animate-spin text-slate-950" />
-                    <span>Verifying with World ID...</span>
+                    <span>Connecting World ID...</span>
                   </>
                 ) : (
                   <>
                     <ShieldCheck className="w-4 h-4 text-slate-950" />
-                    <span>Verify with World ID</span>
+                    <span>{worldIdNotice ? "Reopen World ID Verification" : "Verify with World ID (IDKit v4)"}</span>
                   </>
                 )}
               </button>
 
-              <div className="flex gap-2">
-                <button
-                  onClick={() => setCurrentStep("preview")}
-                  className="flex-1 py-2.5 rounded-xl border border-slate-800 bg-slate-900 hover:bg-slate-850 text-slate-400 text-xs font-medium"
-                >
-                  Back to Photo
-                </button>
-                <button
-                  onClick={() =>
-                    setWorldIdStatus(worldIdStatus === "throttled" ? "idle" : "throttled")
-                  }
-                  className="px-3 py-2.5 rounded-xl border border-slate-800 text-slate-500 hover:text-slate-300 text-xs font-mono"
-                  title="Simulate Rate Limit"
-                >
-                  Toggle Throttled State
-                </button>
-              </div>
+              {/* Secondary: Return to Photo / Retake */}
+              <button
+                onClick={() => {
+                  setIsIdKitOpen(false);
+                  setWorldIdStatus("idle");
+                  setWorldIdNotice(null);
+                  setWorldIdError(null);
+                  setCurrentStep("preview");
+                }}
+                className="w-full py-3 rounded-2xl border border-slate-800 bg-slate-900/80 hover:bg-slate-800 text-slate-300 text-xs font-medium transition-colors"
+              >
+                Back to Photo / Retake
+              </button>
             </div>
           </div>
         )}
@@ -646,6 +794,14 @@ export default function FindScreen() {
             <p className="text-xs text-slate-400 mt-1 max-w-xs">
               Matching is computed inside a Chainlink CRE TEE hardware enclave. Even system operators cannot inspect the biometric embeddings.
             </p>
+
+            {/* Verified Nullifier Badge */}
+            {verifiedNullifier && (
+              <div className="mt-3 px-3 py-1.5 rounded-xl bg-slate-950 border border-emerald-800/80 text-[11px] font-mono text-emerald-400 flex items-center gap-1.5">
+                <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
+                <span>World ID Nullifier: {verifiedNullifier.slice(0, 14)}... (Verified)</span>
+              </div>
+            )}
 
             {/* Step Progress Checklist */}
             <div className="mt-6 w-full space-y-3 text-left">
