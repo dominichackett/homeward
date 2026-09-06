@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useState, useRef, useEffect } from "react";
+import React, { useState, useRef, useEffect, useCallback } from "react";
 import Link from "next/link";
 import {
   Camera,
@@ -16,11 +16,21 @@ import {
   EyeOff,
   Cpu,
   Sparkles,
-  ArrowLeft,
-  Flame
+  Flame,
+  AlertTriangle,
+  ScanFace,
+  XCircle
 } from "lucide-react";
 
 type FlowStep = "camera" | "preview" | "world_id" | "processing" | "confirmed";
+
+interface DetectionInfo {
+  detected: boolean;
+  score?: number;
+  descriptor?: number[];
+  box?: { x: number; y: number; width: number; height: number };
+  error?: string | null;
+}
 
 export default function FindScreen() {
   const [currentStep, setCurrentStep] = useState<FlowStep>("camera");
@@ -30,10 +40,61 @@ export default function FindScreen() {
   const [processingStage, setProcessingStage] = useState(1);
   const [worldIdStatus, setWorldIdStatus] = useState<"idle" | "verifying" | "throttled">("idle");
 
+  // face-api.js state
+  const [modelsLoaded, setModelsLoaded] = useState(false);
+  const [modelsLoading, setModelsLoading] = useState(true);
+  const [modelError, setModelError] = useState<string | null>(null);
+  const [isDetecting, setIsDetecting] = useState(false);
+  const [detection, setDetection] = useState<DetectionInfo | null>(null);
+
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const canvasRef = useRef<HTMLCanvasElement | null>(null);
+  const faceApiRef = useRef<typeof import("@vladmandic/face-api") | null>(null);
 
-  // Initialize camera stream
+  // 1. Initialize & Load face-api.js Models
+  useEffect(() => {
+    let isMounted = true;
+
+    async function loadFaceApi() {
+      try {
+        setModelsLoading(true);
+        setModelError(null);
+
+        // Dynamically import @vladmandic/face-api for client-side execution
+        const faceapi = await import("@vladmandic/face-api");
+        faceApiRef.current = faceapi;
+
+        // Load Tiny Face Detector, SSD Mobilenet, 68 Landmark & Recognition models from /models
+        await Promise.all([
+          faceapi.nets.tinyFaceDetector.loadFromUri("/models"),
+          faceapi.nets.faceLandmark68TinyNet.loadFromUri("/models"),
+          faceapi.nets.faceLandmark68Net.loadFromUri("/models"),
+          faceapi.nets.faceRecognitionNet.loadFromUri("/models"),
+          faceapi.nets.ssdMobilenetv1.loadFromUri("/models"),
+        ]);
+
+        if (isMounted) {
+          setModelsLoaded(true);
+          setModelsLoading(false);
+        }
+      } catch (err) {
+        console.error("Failed to load face-api models:", err);
+        if (isMounted) {
+          setModelError(err instanceof Error ? err.message : "Error loading models");
+          setModelsLoading(false);
+        }
+      }
+    }
+
+    loadFaceApi();
+
+    return () => {
+      isMounted = false;
+    };
+  }, []);
+
+  // 2. Manage Camera Stream
   useEffect(() => {
     let stream: MediaStream | null = null;
     if (currentStep === "camera") {
@@ -49,7 +110,7 @@ export default function FindScreen() {
         })
         .catch(() => {
           setIsStreaming(false);
-          setCameraError("Camera unavailable or permission denied. You can select a test photo below.");
+          setCameraError("Camera unavailable or permission denied. You can select or test a photo below.");
         });
     }
 
@@ -60,7 +121,110 @@ export default function FindScreen() {
     };
   }, [currentStep]);
 
-  // Capture snapshot from video stream or mockup
+  // 3. Run face-api.js Detection on Image
+  const runFaceDetection = useCallback(async (imageSrc: string) => {
+    setIsDetecting(true);
+    setDetection(null);
+
+    const api = faceApiRef.current;
+    if (!api) {
+      setIsDetecting(false);
+      setDetection({
+        detected: false,
+        error: "Face AI engine is initializing. Please wait 2 seconds and try again.",
+      });
+      return;
+    }
+
+    const img = new Image();
+    if (!imageSrc.startsWith("data:")) {
+      img.crossOrigin = "anonymous";
+    }
+
+    img.onload = async () => {
+      try {
+        // Pass 1: Try Tiny Face Detector (fast, mobile-friendly)
+        let result = await api
+          .detectSingleFace(
+            img,
+            new api.TinyFaceDetectorOptions({ inputSize: 416, scoreThreshold: 0.35 })
+          )
+          .withFaceLandmarks(true)
+          .withFaceDescriptor();
+
+        // Pass 2: Fallback to SSD Mobilenet V1 if Tiny did not detect
+        if (!result && api.nets.ssdMobilenetv1.isLoaded) {
+          result = await api
+            .detectSingleFace(img, new api.SsdMobilenetv1Options({ minConfidence: 0.35 }))
+            .withFaceLandmarks()
+            .withFaceDescriptor();
+        }
+
+        if (result) {
+          const scorePercent = Math.round(result.detection.score * 100);
+          const descriptorArray = Array.from(result.descriptor);
+
+          setDetection({
+            detected: true,
+            score: scorePercent,
+            descriptor: descriptorArray,
+            box: {
+              x: result.detection.box.x,
+              y: result.detection.box.y,
+              width: result.detection.box.width,
+              height: result.detection.box.height,
+            },
+          });
+
+          // Draw bounding box and landmarks onto overlay canvas
+          if (canvasRef.current) {
+            const canvas = canvasRef.current;
+            canvas.width = img.naturalWidth || img.width;
+            canvas.height = img.naturalHeight || img.height;
+            const displaySize = {
+              width: img.naturalWidth || img.width,
+              height: img.naturalHeight || img.height,
+            };
+            api.matchDimensions(canvas, displaySize);
+            const resizedResult = api.resizeResults(result, displaySize);
+
+            const ctx = canvas.getContext("2d");
+            if (ctx) {
+              ctx.clearRect(0, 0, canvas.width, canvas.height);
+            }
+
+            api.draw.drawDetections(canvas, resizedResult);
+            api.draw.drawFaceLandmarks(canvas, resizedResult);
+          }
+        } else {
+          setDetection({
+            detected: false,
+            error: "No human face detected in this image. Please ensure the face is centered, well-lit, and not obstructed.",
+          });
+        }
+      } catch (err) {
+        console.error("Face detection execution error:", err);
+        setDetection({
+          detected: false,
+          error: `Biometric scan error: ${err instanceof Error ? err.message : "Unknown failure"}`,
+        });
+      } finally {
+        setIsDetecting(false);
+      }
+    };
+
+    img.onerror = () => {
+      setIsDetecting(false);
+      setDetection({
+        detected: false,
+        error: "Failed to load image for scanning. Please try a different photo.",
+      });
+    };
+
+    img.src = imageSrc;
+  }, []);
+
+  // Handle Capture from Live Camera
   const handleCapture = () => {
     if (videoRef.current && isStreaming) {
       const canvas = document.createElement("canvas");
@@ -69,29 +233,33 @@ export default function FindScreen() {
       const ctx = canvas.getContext("2d");
       if (ctx) {
         ctx.drawImage(videoRef.current, 0, 0, canvas.width, canvas.height);
-        setCapturedImage(canvas.toDataURL("image/jpeg"));
+        const dataUrl = canvas.toDataURL("image/jpeg", 0.9);
+        setCapturedImage(dataUrl);
+        setCurrentStep("preview");
+        runFaceDetection(dataUrl);
       }
     } else {
-      // Fallback placeholder image for testing interface
-      setCapturedImage("/demo-face.jpg");
+      // If camera is not streaming, open system camera / photo picker
+      fileInputRef.current?.click();
     }
-    setCurrentStep("preview");
   };
 
-  // Handle file upload fallback
+  // Handle File Upload
   const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (file) {
       const reader = new FileReader();
       reader.onload = (event) => {
-        setCapturedImage(event.target?.result as string);
+        const dataUrl = event.target?.result as string;
+        setCapturedImage(dataUrl);
         setCurrentStep("preview");
+        runFaceDetection(dataUrl);
       };
       reader.readAsDataURL(file);
     }
   };
 
-  // Simulate World ID verification
+  // World ID Verification Simulation
   const handleVerifyWorldId = () => {
     setWorldIdStatus("verifying");
     setTimeout(() => {
@@ -101,7 +269,7 @@ export default function FindScreen() {
     }, 1200);
   };
 
-  // Simulate TEE Confidential matching progression
+  // Chainlink CRE TEE Confidential Workflow Simulation
   const startSimulatedProcessing = () => {
     setProcessingStage(1);
     setTimeout(() => setProcessingStage(2), 1200);
@@ -113,6 +281,7 @@ export default function FindScreen() {
 
   const handleReset = () => {
     setCapturedImage(null);
+    setDetection(null);
     setCurrentStep("camera");
     setProcessingStage(1);
     setWorldIdStatus("idle");
@@ -132,27 +301,48 @@ export default function FindScreen() {
                 Homeward
               </span>
               <span className="text-[10px] uppercase font-semibold text-cyan-400 bg-cyan-950/70 px-1.5 py-0.5 rounded border border-cyan-800 ml-2">
-                Confidential
+                Finder Screen
               </span>
             </div>
           </Link>
 
+          {/* AI Model Status Badge */}
           <div className="flex items-center gap-2">
-            <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium bg-emerald-950/80 text-emerald-400 border border-emerald-800/80">
-              <Lock className="w-3 h-3" />
-              Zero Knowledge
-            </span>
+            {modelsLoading ? (
+              <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium bg-amber-950/80 text-amber-400 border border-amber-800/80">
+                <RefreshCw className="w-3 h-3 animate-spin" />
+                Loading face-api.js...
+              </span>
+            ) : modelsLoaded ? (
+              <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium bg-emerald-950/80 text-emerald-400 border border-emerald-800/80">
+                <ScanFace className="w-3 h-3 text-emerald-400" />
+                face-api.js Ready
+              </span>
+            ) : (
+              <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium bg-red-950/80 text-red-400 border border-red-800/80">
+                <AlertCircle className="w-3 h-3" />
+                AI Model Error
+              </span>
+            )}
           </div>
         </div>
       </header>
 
       {/* Main Container */}
       <main className="flex-1 max-w-xl w-full mx-auto p-4 flex flex-col justify-center">
+        {/* Model Error Notice if any */}
+        {modelError && (
+          <div className="mb-4 p-3 rounded-2xl bg-red-950/80 border border-red-800 text-red-300 text-xs flex items-center gap-2">
+            <AlertTriangle className="w-4 h-4 shrink-0 text-red-400" />
+            <span>Model loading error: {modelError}</span>
+          </div>
+        )}
+
         {/* ==================== STATE 1: CAMERA SCANNER ==================== */}
         {currentStep === "camera" && (
           <div className="flex flex-col items-center animate-fade-in">
             {/* Viewfinder Card */}
-            <div className="relative w-full aspect-[3/4] max-h-[520px] rounded-3xl overflow-hidden bg-slate-900 border-2 border-slate-800 shadow-2xl shadow-cyan-950/30 flex items-center justify-center">
+            <div className="relative w-full aspect-[3/4] max-h-[460px] rounded-3xl overflow-hidden bg-slate-900 border-2 border-slate-800 shadow-2xl shadow-cyan-950/30 flex items-center justify-center">
               {/* Video Element for live stream */}
               <video
                 ref={videoRef}
@@ -164,53 +354,38 @@ export default function FindScreen() {
                 }`}
               />
 
-              {/* Simulated fallback graphic if camera is not active */}
+              {/* Fallback graphic if camera is unavailable */}
               {!isStreaming && (
                 <div className="flex flex-col items-center justify-center p-6 text-center text-slate-400">
                   <div className="w-20 h-20 rounded-full bg-slate-800/80 border border-slate-700 flex items-center justify-center mb-4 text-slate-400 animate-pulse">
                     <Camera className="w-10 h-10" />
                   </div>
-                  <p className="text-sm font-medium text-slate-300">Camera Viewfinder</p>
-                  <p className="text-xs text-slate-500 mt-1 max-w-[240px]">
-                    {cameraError || "Point camera at the person's face to assist"}
+                  <p className="text-sm font-semibold text-slate-200">Camera Viewfinder</p>
+                  <p className="text-xs text-slate-500 mt-1 max-w-[260px]">
+                    {cameraError || "Point camera at the person's face."}
                   </p>
                 </div>
               )}
 
-              {/* Target Face Oval Reticle */}
-              <div className="pointer-events-none absolute inset-0 flex items-center justify-center">
-                <div className="relative w-64 h-80 rounded-[48%] border-2 border-dashed border-cyan-400/60 shadow-[0_0_20px_rgba(6,182,212,0.15)] flex items-center justify-center">
-                  <div className="absolute top-2 text-[11px] font-mono tracking-wider uppercase text-cyan-300/80 bg-slate-950/60 px-2 py-0.5 rounded backdrop-blur-sm">
-                    Align Face Here
-                  </div>
-
-                  {/* Corner Guides */}
-                  <div className="absolute -top-3 -left-3 w-6 h-6 border-t-2 border-l-2 border-cyan-400 rounded-tl-lg" />
-                  <div className="absolute -top-3 -right-3 w-6 h-6 border-t-2 border-r-2 border-cyan-400 rounded-tr-lg" />
-                  <div className="absolute -bottom-3 -left-3 w-6 h-6 border-b-2 border-l-2 border-cyan-400 rounded-bl-lg" />
-                  <div className="absolute -bottom-3 -right-3 w-6 h-6 border-b-2 border-r-2 border-cyan-400 rounded-br-lg" />
-                </div>
+              {/* Subtle corner framing indicators */}
+              <div className="pointer-events-none absolute inset-4 border border-white/10 rounded-2xl">
+                <div className="absolute top-0 left-0 w-4 h-4 border-t-2 border-l-2 border-white/40 rounded-tl" />
+                <div className="absolute top-0 right-0 w-4 h-4 border-t-2 border-r-2 border-white/40 rounded-tr" />
+                <div className="absolute bottom-0 left-0 w-4 h-4 border-b-2 border-l-2 border-white/40 rounded-bl" />
+                <div className="absolute bottom-0 right-0 w-4 h-4 border-b-2 border-r-2 border-white/40 rounded-br" />
               </div>
 
-              {/* Status Badge */}
+              {/* Status Badges */}
               <div className="absolute top-4 left-4 right-4 flex justify-between items-center pointer-events-none">
                 <div className="flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-slate-950/80 backdrop-blur-md border border-slate-700/60 text-xs font-medium text-slate-200">
                   <span className="w-2 h-2 rounded-full bg-emerald-400 animate-ping" />
-                  <span>Ready to Scan</span>
+                  <span>face-api.js Ready</span>
                 </div>
-                <div className="flex items-center gap-1 px-2 py-1 rounded-full bg-slate-950/80 backdrop-blur-md border border-slate-700/60 text-xs text-slate-400">
+                <div className="flex items-center gap-1 px-2.5 py-1 rounded-full bg-slate-950/80 backdrop-blur-md border border-slate-700/60 text-xs text-slate-400">
                   <EyeOff className="w-3.5 h-3.5 text-cyan-400" />
                   <span>Confidential</span>
                 </div>
               </div>
-            </div>
-
-            {/* Privacy Assurance Banner */}
-            <div className="w-full mt-3 p-2.5 rounded-xl bg-slate-900/60 border border-slate-800 text-xs text-slate-400 flex items-center gap-2">
-              <ShieldCheck className="w-4 h-4 text-cyan-400 shrink-0" />
-              <span>
-                <strong>Privacy Guaranteed:</strong> Captured photos never leave this device unless an enrolled match is confirmed.
-              </span>
             </div>
 
             {/* Action Bar */}
@@ -219,70 +394,150 @@ export default function FindScreen() {
                 ref={fileInputRef}
                 type="file"
                 accept="image/*"
+                capture="environment"
                 className="hidden"
                 onChange={handleFileUpload}
               />
               <button
                 onClick={() => fileInputRef.current?.click()}
-                className="flex items-center justify-center gap-2 px-4 py-3.5 rounded-2xl bg-slate-900 hover:bg-slate-800 border border-slate-800 text-slate-300 text-sm font-medium transition-all"
+                className="flex items-center justify-center gap-2 px-4 py-3.5 rounded-2xl bg-slate-900 hover:bg-slate-850 border border-slate-800 text-slate-300 text-sm font-medium transition-all"
               >
-                <Upload className="w-4 h-4" />
-                <span className="hidden sm:inline">Upload</span>
+                <Upload className="w-4 h-4 text-cyan-400" />
+                <span className="hidden sm:inline">Upload Photo</span>
               </button>
 
               <button
                 onClick={handleCapture}
-                className="flex-1 flex items-center justify-center gap-2 py-4 px-6 rounded-2xl bg-gradient-to-r from-cyan-500 to-blue-600 hover:from-cyan-400 hover:to-blue-500 text-white font-semibold text-base shadow-lg shadow-cyan-500/25 active:scale-[0.98] transition-all"
+                disabled={modelsLoading}
+                className="flex-1 flex items-center justify-center gap-2 py-4 px-6 rounded-2xl bg-gradient-to-r from-cyan-500 to-blue-600 hover:from-cyan-400 hover:to-blue-500 text-white font-semibold text-base shadow-lg shadow-cyan-500/25 active:scale-[0.98] transition-all disabled:opacity-50"
               >
                 <Camera className="w-5 h-5" />
-                <span>Scan & Assist</span>
+                <span>{isStreaming ? "Take Photo" : "Take Test Photo"}</span>
               </button>
             </div>
           </div>
         )}
 
-        {/* ==================== STATE 2: PREVIEW CAPTURED ==================== */}
+        {/* ==================== STATE 2: PREVIEW & FACE-API DETECTION RESULT ==================== */}
         {currentStep === "preview" && (
-          <div className="flex flex-col items-center">
-            <div className="relative w-full aspect-[3/4] max-h-[480px] rounded-3xl overflow-hidden bg-slate-900 border-2 border-cyan-500/40 shadow-2xl flex items-center justify-center">
+          <div className="flex flex-col items-center animate-fade-in">
+            <div className="relative w-full aspect-[3/4] max-h-[460px] rounded-3xl overflow-hidden bg-slate-900 border-2 border-slate-800 shadow-2xl flex items-center justify-center">
               {capturedImage ? (
-                // eslint-disable-next-line @next/next/no-img-element
-                <img
-                  src={capturedImage}
-                  alt="Captured face preview"
-                  className="w-full h-full object-cover"
-                />
+                <>
+                  {/* Base Image */}
+                  {/* eslint-disable-next-line @next/next/no-img-element */}
+                  <img
+                    src={capturedImage}
+                    alt="Captured portrait"
+                    className="w-full h-full object-cover"
+                  />
+                  {/* Canvas Overlay for face-api landmarks & bounding box */}
+                  <canvas
+                    ref={canvasRef}
+                    className="absolute inset-0 w-full h-full object-cover pointer-events-none"
+                  />
+                </>
               ) : (
-                <div className="w-full h-full bg-slate-800 flex items-center justify-center text-slate-500">
-                  Photo Captured
+                <div className="text-slate-500 text-xs">No image loaded</div>
+              )}
+
+              {/* In-Progress Detection Overlay */}
+              {isDetecting && (
+                <div className="absolute inset-0 bg-slate-950/80 backdrop-blur-xs flex flex-col items-center justify-center p-6 text-center">
+                  <div className="relative w-16 h-16 flex items-center justify-center mb-3">
+                    <div className="absolute inset-0 rounded-full border-2 border-cyan-500/40 animate-ping" />
+                    <RefreshCw className="w-8 h-8 text-cyan-400 animate-spin" />
+                  </div>
+                  <p className="text-sm font-bold text-white">Analyzing Biometrics with face-api.js...</p>
+                  <p className="text-xs text-slate-400 mt-1">
+                    Extracting facial contour, 68 landmarks, and 128D embedding vector.
+                  </p>
                 </div>
               )}
 
-              <div className="absolute bottom-4 left-4 right-4 bg-slate-950/85 backdrop-blur-md border border-slate-800 p-3 rounded-2xl">
-                <div className="flex items-center gap-2 text-cyan-300 text-xs font-semibold uppercase tracking-wider">
-                  <Sparkles className="w-3.5 h-3.5" />
-                  Face Detected Locally
-                </div>
-                <p className="text-xs text-slate-400 mt-0.5">
-                  Vector embedding extracted in browser. Image held in memory only.
-                </p>
+              {/* Top Result Pill */}
+              <div className="absolute top-4 left-4 right-4 flex justify-between items-center pointer-events-none">
+                {detection?.detected ? (
+                  <span className="px-3 py-1 rounded-full bg-emerald-950/90 border border-emerald-800 text-emerald-400 text-xs font-semibold flex items-center gap-1.5 shadow-lg">
+                    <CheckCircle2 className="w-3.5 h-3.5" />
+                    <span>Face Verified ({detection.score}%)</span>
+                  </span>
+                ) : detection?.detected === false && !isDetecting ? (
+                  <span className="px-3 py-1 rounded-full bg-red-950/90 border border-red-800 text-red-400 text-xs font-semibold flex items-center gap-1.5 shadow-lg">
+                    <XCircle className="w-3.5 h-3.5" />
+                    <span>No Face Detected</span>
+                  </span>
+                ) : null}
+
+                <span className="px-2.5 py-1 rounded-full bg-slate-950/80 border border-slate-800 text-slate-400 text-[11px] font-mono">
+                  face-api.js
+                </span>
               </div>
             </div>
 
+            {/* Verification Status Details */}
+            <div className="w-full mt-3.5">
+              {detection?.detected ? (
+                <div className="p-3.5 rounded-2xl bg-emerald-950/40 border border-emerald-800/80 text-left space-y-2">
+                  <div className="flex items-center justify-between">
+                    <div className="flex items-center gap-2 text-emerald-400 text-xs font-bold">
+                      <Sparkles className="w-4 h-4" />
+                      <span>Biometric Landmarks & 128D Vector Extracted</span>
+                    </div>
+                    <span className="text-[10px] font-mono text-emerald-400 bg-emerald-950 px-2 py-0.5 rounded border border-emerald-800">
+                      128 Dimensions
+                    </span>
+                  </div>
+                  <p className="text-xs text-slate-300 leading-normal">
+                    face-api.js verified clear facial landmarks. The raw image remains strictly in local memory and will only be uploaded if an enclave match is confirmed.
+                  </p>
+                  {detection.descriptor && (
+                    <div className="p-2 rounded-xl bg-slate-950/80 border border-slate-800 text-[10px] font-mono text-cyan-300 truncate">
+                      Vector: [{detection.descriptor.slice(0, 6).map((n) => n.toFixed(4)).join(", ")}...]
+                    </div>
+                  )}
+                </div>
+              ) : detection?.error ? (
+                <div className="p-3.5 rounded-2xl bg-red-950/50 border border-red-800 text-left space-y-1.5">
+                  <div className="flex items-center gap-2 text-red-400 text-xs font-bold">
+                    <AlertTriangle className="w-4 h-4 shrink-0" />
+                    <span>Face Detection Failed</span>
+                  </div>
+                  <p className="text-xs text-red-200 leading-relaxed">
+                    {detection.error}
+                  </p>
+                </div>
+              ) : null}
+            </div>
+
+            {/* Action Bar */}
             <div className="w-full mt-4 flex gap-3">
               <button
                 onClick={handleReset}
-                className="flex items-center justify-center gap-2 px-5 py-3.5 rounded-2xl bg-slate-900 hover:bg-slate-800 border border-slate-800 text-slate-300 text-sm font-medium transition-all"
+                className="flex items-center justify-center gap-2 px-5 py-3.5 rounded-2xl bg-slate-900 hover:bg-slate-850 border border-slate-800 text-slate-300 text-xs font-semibold transition-all"
               >
                 <RefreshCw className="w-4 h-4" />
                 <span>Retake</span>
               </button>
 
               <button
-                onClick={() => setCurrentStep("world_id")}
-                className="flex-1 flex items-center justify-center gap-2 py-3.5 px-6 rounded-2xl bg-gradient-to-r from-cyan-500 to-blue-600 hover:from-cyan-400 hover:to-blue-500 text-white font-semibold text-sm shadow-lg shadow-cyan-500/25 transition-all"
+                onClick={() => fileInputRef.current?.click()}
+                className="flex items-center justify-center gap-2 px-4 py-3.5 rounded-2xl bg-slate-900 hover:bg-slate-850 border border-slate-800 text-slate-300 text-xs font-semibold transition-all"
               >
-                <span>Continue to Verification</span>
+                <Upload className="w-4 h-4 text-cyan-400" />
+                <span>Upload</span>
+              </button>
+
+              <button
+                onClick={() => setCurrentStep("world_id")}
+                disabled={!detection?.detected || isDetecting}
+                className={`flex-1 flex items-center justify-center gap-2 py-3.5 px-6 rounded-2xl font-bold text-xs shadow-lg transition-all ${
+                  detection?.detected && !isDetecting
+                    ? "bg-gradient-to-r from-cyan-500 to-blue-600 hover:from-cyan-400 hover:to-blue-500 text-white shadow-cyan-500/25 active:scale-[0.99]"
+                    : "bg-slate-800 text-slate-500 cursor-not-allowed border border-slate-700/50"
+                }`}
+              >
+                <span>{detection?.detected ? "Continue to World ID" : "Face Required to Continue"}</span>
                 <ChevronRight className="w-4 h-4" />
               </button>
             </div>
@@ -292,7 +547,7 @@ export default function FindScreen() {
         {/* ==================== STATE 3: WORLD ID GATE MODAL ==================== */}
         {currentStep === "world_id" && (
           <div className="w-full bg-slate-900 border border-slate-800 rounded-3xl p-6 shadow-2xl animate-fade-in flex flex-col items-center text-center">
-            {/* World ID Orb Icon Header */}
+            {/* World ID Orb Header */}
             <div className="w-16 h-16 rounded-2xl bg-gradient-to-tr from-slate-900 via-slate-800 to-slate-700 border border-slate-700 shadow-xl flex items-center justify-center mb-4 relative">
               <div className="w-10 h-10 rounded-full border-2 border-white/80 flex items-center justify-center">
                 <div className="w-4 h-4 rounded-full bg-white animate-pulse" />
@@ -306,14 +561,14 @@ export default function FindScreen() {
               World ID Selfie Check
             </h2>
             <p className="text-xs font-medium uppercase tracking-widest text-cyan-400 mt-1">
-              Human Abuse Prevention
+              Human Abuse Prevention Gate
             </p>
 
             <p className="text-xs text-slate-400 mt-3 leading-relaxed max-w-sm">
-              To prevent automated bots, mass scraping, and prank reports against vulnerable individuals, please verify your uniqueness with World ID.
+              To prevent automated bots, mass scraping, and prank probes against vulnerable persons, please verify your uniqueness with World ID.
             </p>
 
-            {/* Status box if throttled */}
+            {/* Throttled status banner */}
             {worldIdStatus === "throttled" && (
               <div className="mt-4 p-3 rounded-xl bg-amber-950/60 border border-amber-800 text-amber-300 text-xs flex items-center gap-2 text-left w-full">
                 <Flame className="w-4 h-4 shrink-0 text-amber-400" />
@@ -325,10 +580,10 @@ export default function FindScreen() {
             <div className="mt-5 w-full bg-slate-950/60 border border-slate-800/80 rounded-2xl p-3.5 text-left text-xs space-y-2">
               <div className="flex items-center gap-2 text-slate-300 font-medium">
                 <Lock className="w-3.5 h-3.5 text-cyan-400 shrink-0" />
-                <span>Zero-Knowledge Proof</span>
+                <span>Zero-Knowledge Proof Guarantee</span>
               </div>
               <p className="text-slate-400 text-[11px] leading-normal pl-5.5">
-                World ID does not share your real name or personal information. It only asserts you are a real human reporter.
+                World ID does not share your real name or personal information. It only asserts you are a real, distinct human reporter.
               </p>
             </div>
 
@@ -354,10 +609,10 @@ export default function FindScreen() {
 
               <div className="flex gap-2">
                 <button
-                  onClick={() => setCurrentStep("camera")}
+                  onClick={() => setCurrentStep("preview")}
                   className="flex-1 py-2.5 rounded-xl border border-slate-800 bg-slate-900 hover:bg-slate-850 text-slate-400 text-xs font-medium"
                 >
-                  Cancel
+                  Back to Photo
                 </button>
                 <button
                   onClick={() =>
@@ -373,7 +628,7 @@ export default function FindScreen() {
           </div>
         )}
 
-        {/* ==================== STATE 4: CONFIDENTIAL PROCESSING ==================== */}
+        {/* ==================== STATE 4: CONFIDENTIAL ENCLAVE MATCHING ==================== */}
         {currentStep === "processing" && (
           <div className="w-full bg-slate-900 border border-slate-800 rounded-3xl p-6 shadow-2xl animate-fade-in flex flex-col items-center text-center">
             {/* Enclave Pulsing Hub */}
@@ -407,8 +662,8 @@ export default function FindScreen() {
                   <RefreshCw className="w-4 h-4 animate-spin text-cyan-400 shrink-0" />
                 )}
                 <div className="text-xs">
-                  <p className="font-semibold text-slate-200">1. Client-Side Embedding</p>
-                  <p className="text-[11px] text-slate-400">128D facial vector extracted via face-api.js</p>
+                  <p className="font-semibold text-slate-200">1. On-Device face-api.js Embedding</p>
+                  <p className="text-[11px] text-slate-400">128D facial descriptor extracted and encrypted locally</p>
                 </div>
               </div>
 
@@ -428,7 +683,7 @@ export default function FindScreen() {
                 )}
                 <div className="text-xs">
                   <p className="font-semibold text-slate-200">2. Enclave Ciphertext Transmission</p>
-                  <p className="text-[11px] text-slate-400">Encrypted with CRE TEE public key</p>
+                  <p className="text-[11px] text-slate-400">Encrypted with Chainlink CRE TEE public key</p>
                 </div>
               </div>
 
@@ -476,7 +731,7 @@ export default function FindScreen() {
               </div>
             </div>
 
-            {/* Emergency & Bystander Guidelines Accordion/Card */}
+            {/* Emergency & Bystander Guidelines */}
             <div className="mt-5 w-full bg-slate-950/60 border border-slate-800 rounded-2xl p-4 text-left">
               <div className="flex items-center gap-2 text-slate-200 text-xs font-semibold mb-2">
                 <Info className="w-4 h-4 text-cyan-400" />
@@ -514,7 +769,7 @@ export default function FindScreen() {
         )}
       </main>
 
-      {/* Footer / Interface State Switcher for Review */}
+      {/* Footer / Interface State Switcher */}
       <footer className="border-t border-slate-800/80 bg-slate-950/90 py-3 px-4 text-center">
         <div className="max-w-xl mx-auto flex flex-col sm:flex-row items-center justify-between gap-2 text-xs text-slate-500">
           <div className="flex items-center gap-1">
