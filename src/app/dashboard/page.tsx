@@ -156,16 +156,6 @@ export default function CaregiverDashboard() {
     setCurrentUser(null);
   };
 
-  const handleDemoCaregiverUnlock = () => {
-    const demoUser = {
-      email: "sarah.vance@homeward.safe",
-      name: "Sarah Vance",
-      id: "demo-guardian-sarah",
-    };
-    localStorage.setItem("homeward_caregiver_session", JSON.stringify(demoUser));
-    setCurrentUser(demoUser);
-  };
-
   // Form State
   const [formData, setFormData] = useState({
     fullName: "",
@@ -465,15 +455,6 @@ export default function CaregiverDashboard() {
                   <KeyRound className="w-4 h-4" />
                   <span>Sign In via Supabase Auth</span>
                 </Link>
-
-                <button
-                  type="button"
-                  onClick={handleDemoCaregiverUnlock}
-                  className="w-full py-2.5 px-4 rounded-xl bg-slate-800 hover:bg-slate-750 text-slate-200 border border-slate-700 text-xs font-semibold flex items-center justify-center gap-2 transition-colors"
-                >
-                  <Sparkles className="w-3.5 h-3.5 text-cyan-400" />
-                  <span>One-Click Demo Caregiver (Sarah Vance)</span>
-                </button>
               </div>
 
               <div className="mt-6 pt-5 border-t border-slate-800/80 w-full text-center">

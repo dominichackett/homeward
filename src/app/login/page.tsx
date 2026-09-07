@@ -8,7 +8,6 @@ import {
   Lock,
   Mail,
   ArrowRight,
-  Sparkles,
   AlertCircle,
   CheckCircle2,
   KeyRound,
@@ -108,25 +107,6 @@ export default function LoginPage() {
     } finally {
       setIsLoading(false);
     }
-  };
-
-  // 3. One-Click Evaluator Demo Sign-In (For frictionless hackathon evaluation)
-  const handleDemoSignIn = () => {
-    setIsLoading(true);
-    localStorage.setItem(
-      "homeward_caregiver_session",
-      JSON.stringify({
-        email: "sarah.vance@homeward.safe",
-        name: "Sarah Vance",
-        id: "demo-guardian-sarah",
-        role: "authenticated",
-      })
-    );
-
-    setTimeout(() => {
-      setIsLoading(false);
-      router.push(redirectTo);
-    }, 400);
   };
 
   return (
@@ -272,25 +252,6 @@ export default function LoginPage() {
               </form>
             </>
           )}
-
-          {/* Divider */}
-          <div className="relative w-full my-6 flex items-center justify-center">
-            <div className="border-t border-slate-800 w-full" />
-            <span className="bg-slate-900 px-3 text-[11px] uppercase tracking-wider text-slate-500 font-semibold absolute">
-              Or Evaluator Demo
-            </span>
-          </div>
-
-          {/* One-Click Demo Access for Judges */}
-          <button
-            type="button"
-            onClick={handleDemoSignIn}
-            disabled={isLoading}
-            className="w-full py-2.5 px-4 rounded-xl bg-slate-800/90 hover:bg-slate-750 text-slate-200 border border-slate-700 text-xs font-semibold flex items-center justify-center gap-2 transition-colors shadow-sm"
-          >
-            <Sparkles className="w-3.5 h-3.5 text-cyan-400" />
-            <span>One-Click Demo Caregiver (Sarah Vance)</span>
-          </button>
 
           {/* Privacy Guarantee Note */}
           <div className="mt-6 p-3 rounded-xl bg-slate-950/60 border border-slate-800/80 text-[11px] text-slate-400 text-left flex items-start gap-2">
