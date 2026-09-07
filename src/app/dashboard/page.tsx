@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useState, useRef } from "react";
+import React, { useState, useRef, useEffect } from "react";
 import Link from "next/link";
 import {
   ShieldCheck,
@@ -24,8 +24,11 @@ import {
   ShieldAlert,
   Camera,
   Trash2,
-  Info
+  Info,
+  KeyRound,
+  LogOut
 } from "lucide-react";
+import { getSupabaseBrowserClient } from "@/lib/supabase/client";
 
 type Tab = "dependents" | "enroll" | "alerts";
 
@@ -89,6 +92,80 @@ export default function CaregiverDashboard() {
   const [dependents, setDependents] = useState<EnrolledPerson[]>(INITIAL_DEPENDENTS);
   const [isSubmitted, setIsSubmitted] = useState(false);
 
+  // Caregiver Auth State
+  const [currentUser, setCurrentUser] = useState<{ email?: string; id?: string; name?: string } | null>(null);
+  const [isCheckingAuth, setIsCheckingAuth] = useState(true);
+
+  // Check Supabase Auth session on mount
+  useEffect(() => {
+    let isMounted = true;
+    const supabase = getSupabaseBrowserClient();
+
+    if (supabase) {
+      supabase.auth.getSession().then(({ data: { session } }) => {
+        if (isMounted) {
+          if (session?.user) {
+            setCurrentUser({
+              email: session.user.email,
+              id: session.user.id,
+              name: session.user.user_metadata?.full_name || session.user.email?.split("@")[0],
+            });
+          }
+          setIsCheckingAuth(false);
+        }
+      });
+
+      const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => {
+        if (isMounted) {
+          if (session?.user) {
+            setCurrentUser({
+              email: session.user.email,
+              id: session.user.id,
+              name: session.user.user_metadata?.full_name || session.user.email?.split("@")[0],
+            });
+          } else {
+            setCurrentUser(null);
+          }
+        }
+      });
+
+      return () => {
+        isMounted = false;
+        subscription.unsubscribe();
+      };
+    } else {
+      // Local demo caregiver session fallback
+      try {
+        const stored = localStorage.getItem("homeward_caregiver_session");
+        if (stored) {
+          setCurrentUser(JSON.parse(stored));
+        }
+      } catch (err) {
+        console.warn("Could not read local session:", err);
+      }
+      setIsCheckingAuth(false);
+    }
+  }, []);
+
+  const handleSignOut = async () => {
+    const supabase = getSupabaseBrowserClient();
+    if (supabase) {
+      await supabase.auth.signOut();
+    }
+    localStorage.removeItem("homeward_caregiver_session");
+    setCurrentUser(null);
+  };
+
+  const handleDemoCaregiverUnlock = () => {
+    const demoUser = {
+      email: "sarah.vance@homeward.safe",
+      name: "Sarah Vance",
+      id: "demo-guardian-sarah",
+    };
+    localStorage.setItem("homeward_caregiver_session", JSON.stringify(demoUser));
+    setCurrentUser(demoUser);
+  };
+
   // Form State
   const [formData, setFormData] = useState({
     fullName: "",
@@ -105,6 +182,50 @@ export default function CaregiverDashboard() {
 
   const [uploadedPhoto, setUploadedPhoto] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
+
+  // Fetch enrolled dependents from Supabase API on mount
+  useEffect(() => {
+    let isMounted = true;
+    async function loadDependents() {
+      try {
+        const res = await fetch("/api/dependents");
+        if (res.ok) {
+          const data = await res.json();
+          if (isMounted && data.dependents && Array.isArray(data.dependents)) {
+            const mapped: EnrolledPerson[] = data.dependents.map((d: any, idx: number) => ({
+              id: d.id,
+              name: d.full_name,
+              nickname: d.full_name.split(" ")[0],
+              age: 78 - idx * 5,
+              condition: d.condition_notes?.split(".")[0] || "Caregiver Protected",
+              notes: d.condition_notes || "",
+              emergencyContact: {
+                name: d.primary_contact_name,
+                relationship: "Primary Guardian",
+                phone: d.primary_contact_phone,
+              },
+              status: "active",
+              enrolledAt: d.created_at ? d.created_at.split("T")[0] : "2026-08-14",
+              avatarColor:
+                idx % 2 === 0
+                  ? "from-amber-500 to-rose-600"
+                  : "from-cyan-500 to-blue-600",
+              lastVerified: `Enclave Hash: ${
+                d.encrypted_embedding ? d.encrypted_embedding.slice(0, 14) + "..." : "0x7f2a...39b1"
+              }`,
+            }));
+            setDependents(mapped);
+          }
+        }
+      } catch (err) {
+        console.warn("Could not load dependents from API:", err);
+      }
+    }
+    loadDependents();
+    return () => {
+      isMounted = false;
+    };
+  }, []);
 
   const handlePhotoUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
@@ -158,6 +279,29 @@ export default function CaregiverDashboard() {
       lastVerified: "Enclave Hash: 0x9c3d...fa21",
     };
 
+    // Persist to Supabase API
+    fetch("/api/dependents", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        full_name: newPerson.name,
+        condition_notes: `${newPerson.condition}. ${newPerson.notes}`,
+        primary_contact_name: newPerson.emergencyContact.name,
+        primary_contact_phone: newPerson.emergencyContact.phone,
+        primary_contact_email: formData.contactEmail || null,
+        consent_attested: true,
+      }),
+    })
+      .then(async (res) => {
+        if (res.ok) {
+          const data = await res.json();
+          if (data.dependent?.id) {
+            newPerson.id = data.dependent.id;
+          }
+        }
+      })
+      .catch((err) => console.warn("Could not save dependent to API:", err));
+
     setDependents((prev) => [newPerson, ...prev]);
     setIsSubmitted(true);
     setTimeout(() => {
@@ -210,15 +354,32 @@ export default function CaregiverDashboard() {
               <span>Finder Camera</span>
             </Link>
 
-            <div className="flex items-center gap-2 pl-3 border-l border-slate-800">
-              <div className="w-8 h-8 rounded-full bg-gradient-to-tr from-purple-500 to-indigo-600 flex items-center justify-center text-white text-xs font-bold ring-2 ring-purple-500/20">
-                SV
+            {currentUser ? (
+              <div className="flex items-center gap-2 pl-3 border-l border-slate-800">
+                <div className="w-8 h-8 rounded-full bg-gradient-to-tr from-purple-500 to-indigo-600 flex items-center justify-center text-white text-xs font-bold ring-2 ring-purple-500/20 uppercase">
+                  {currentUser.name ? currentUser.name.slice(0, 2) : "SV"}
+                </div>
+                <div className="hidden md:block text-left">
+                  <p className="text-xs font-semibold text-slate-200">{currentUser.name || currentUser.email}</p>
+                  <p className="text-[10px] text-emerald-400 font-medium">Verified Guardian</p>
+                </div>
+                <button
+                  onClick={handleSignOut}
+                  title="Sign out of Caregiver Portal"
+                  className="ml-1 p-1.5 rounded-lg bg-slate-850 hover:bg-slate-800 text-slate-400 hover:text-rose-400 transition-colors"
+                >
+                  <LogOut className="w-3.5 h-3.5" />
+                </button>
               </div>
-              <div className="hidden md:block text-left">
-                <p className="text-xs font-semibold text-slate-200">Sarah Vance</p>
-                <p className="text-[10px] text-slate-400">Authorized Guardian</p>
-              </div>
-            </div>
+            ) : (
+              <Link
+                href="/login?redirect=/dashboard"
+                className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-gradient-to-r from-cyan-500 to-blue-600 text-white text-xs font-semibold shadow-md shadow-cyan-500/20"
+              >
+                <KeyRound className="w-3.5 h-3.5" />
+                <span>Sign In</span>
+              </Link>
+            )}
           </div>
         </div>
       </header>
@@ -239,49 +400,91 @@ export default function CaregiverDashboard() {
             </p>
           </div>
 
-          {/* Navigation Tabs */}
-          <div className="flex items-center gap-1.5 bg-slate-950/80 p-1.5 rounded-2xl border border-slate-800">
-            <button
-              onClick={() => setActiveTab("dependents")}
-              className={`flex items-center gap-2 px-3.5 py-2 rounded-xl text-xs font-semibold transition-all ${
-                activeTab === "dependents"
-                  ? "bg-gradient-to-r from-cyan-500 to-blue-600 text-white shadow-md shadow-cyan-500/20"
-                  : "text-slate-400 hover:text-slate-200 hover:bg-slate-900"
-              }`}
-            >
-              <Users className="w-3.5 h-3.5" />
-              <span>Enrolled Loved Ones ({dependents.length})</span>
-            </button>
+          {/* Navigation Tabs (Only visible when authenticated) */}
+          {currentUser && (
+            <div className="flex items-center gap-1.5 bg-slate-950/80 p-1.5 rounded-2xl border border-slate-800">
+              <button
+                onClick={() => setActiveTab("dependents")}
+                className={`flex items-center gap-2 px-3.5 py-2 rounded-xl text-xs font-semibold transition-all ${
+                  activeTab === "dependents"
+                    ? "bg-gradient-to-r from-cyan-500 to-blue-600 text-white shadow-md shadow-cyan-500/20"
+                    : "text-slate-400 hover:text-slate-200 hover:bg-slate-900"
+                }`}
+              >
+                <Users className="w-3.5 h-3.5" />
+                <span>Enrolled Loved Ones ({dependents.length})</span>
+              </button>
 
-            <button
-              onClick={() => setActiveTab("enroll")}
-              className={`flex items-center gap-2 px-3.5 py-2 rounded-xl text-xs font-semibold transition-all ${
-                activeTab === "enroll"
-                  ? "bg-gradient-to-r from-cyan-500 to-blue-600 text-white shadow-md shadow-cyan-500/20"
-                  : "text-slate-400 hover:text-slate-200 hover:bg-slate-900"
-              }`}
-            >
-              <UserPlus className="w-3.5 h-3.5" />
-              <span>Enroll New</span>
-            </button>
+              <button
+                onClick={() => setActiveTab("enroll")}
+                className={`flex items-center gap-2 px-3.5 py-2 rounded-xl text-xs font-semibold transition-all ${
+                  activeTab === "enroll"
+                    ? "bg-gradient-to-r from-cyan-500 to-blue-600 text-white shadow-md shadow-cyan-500/20"
+                    : "text-slate-400 hover:text-slate-200 hover:bg-slate-900"
+                }`}
+              >
+                <UserPlus className="w-3.5 h-3.5" />
+                <span>Enroll New</span>
+              </button>
 
-            <button
-              onClick={() => setActiveTab("alerts")}
-              className={`flex items-center gap-2 px-3.5 py-2 rounded-xl text-xs font-semibold transition-all ${
-                activeTab === "alerts"
-                  ? "bg-gradient-to-r from-cyan-500 to-blue-600 text-white shadow-md shadow-cyan-500/20"
-                  : "text-slate-400 hover:text-slate-200 hover:bg-slate-900"
-              }`}
-            >
-              <Bell className="w-3.5 h-3.5" />
-              <span>Incident Audit Log</span>
-            </button>
-          </div>
+              <button
+                onClick={() => setActiveTab("alerts")}
+                className={`flex items-center gap-2 px-3.5 py-2 rounded-xl text-xs font-semibold transition-all ${
+                  activeTab === "alerts"
+                    ? "bg-gradient-to-r from-cyan-500 to-blue-600 text-white shadow-md shadow-cyan-500/20"
+                    : "text-slate-400 hover:text-slate-200 hover:bg-slate-900"
+                }`}
+              >
+                <Bell className="w-3.5 h-3.5" />
+                <span>Incident Audit Log</span>
+              </button>
+            </div>
+          )}
         </div>
       </div>
 
       {/* Main Content Area */}
       <main className="flex-1 max-w-6xl w-full mx-auto p-4 sm:p-6">
+        {/* ==================== LOCKED AUTHENTICATION GATE ==================== */}
+        {!currentUser && !isCheckingAuth ? (
+          <div className="max-w-md mx-auto my-12 px-4">
+            <div className="bg-slate-900 border border-slate-800 rounded-3xl p-6 sm:p-8 text-center shadow-2xl animate-fade-in flex flex-col items-center">
+              <div className="w-16 h-16 rounded-2xl bg-gradient-to-tr from-cyan-950 via-slate-800 to-blue-950 border border-cyan-800/80 flex items-center justify-center mb-5 text-cyan-400 shadow-xl">
+                <Lock className="w-8 h-8" />
+              </div>
+              <h2 className="text-xl font-bold text-white tracking-tight">Caregiver Portal Protected</h2>
+              <p className="text-xs text-slate-400 mt-2 leading-relaxed">
+                This dashboard contains confidential medical notes, next-of-kin contacts, and active protected dependents. Please authenticate as an authorized guardian to access.
+              </p>
+
+              <div className="mt-6 w-full space-y-3">
+                <Link
+                  href="/login?redirect=/dashboard"
+                  className="w-full py-3.5 px-4 rounded-xl bg-gradient-to-r from-cyan-500 to-blue-600 hover:from-cyan-400 hover:to-blue-500 text-white font-bold text-xs shadow-lg shadow-cyan-500/25 transition-all flex items-center justify-center gap-2"
+                >
+                  <KeyRound className="w-4 h-4" />
+                  <span>Sign In via Supabase Auth</span>
+                </Link>
+
+                <button
+                  type="button"
+                  onClick={handleDemoCaregiverUnlock}
+                  className="w-full py-2.5 px-4 rounded-xl bg-slate-800 hover:bg-slate-750 text-slate-200 border border-slate-700 text-xs font-semibold flex items-center justify-center gap-2 transition-colors"
+                >
+                  <Sparkles className="w-3.5 h-3.5 text-cyan-400" />
+                  <span>One-Click Demo Caregiver (Sarah Vance)</span>
+                </button>
+              </div>
+
+              <div className="mt-6 pt-5 border-t border-slate-800/80 w-full text-center">
+                <Link href="/" className="text-xs text-slate-500 hover:text-slate-300">
+                  &larr; Return to Safety Portal Home
+                </Link>
+              </div>
+            </div>
+          </div>
+        ) : (
+          <>
         {/* ==================== TAB 1: DEPENDENTS LIST ==================== */}
         {activeTab === "dependents" && (
           <div className="space-y-6">
@@ -743,6 +946,8 @@ export default function CaregiverDashboard() {
               </div>
             </div>
           </div>
+        )}
+          </>
         )}
       </main>
 

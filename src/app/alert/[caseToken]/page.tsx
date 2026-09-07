@@ -53,6 +53,12 @@ export default function EmergencyAlertScreen() {
 
   const handleResolveCase = () => {
     setIsPurging(true);
+    fetch(`/api/incidents/${caseToken}`, {
+      method: "PATCH",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ status: "resolved" }),
+    }).catch((err) => console.warn("Could not patch incident status:", err));
+
     setTimeout(() => {
       setIsPurging(false);
       setShowConfirmModal(false);

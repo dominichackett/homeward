@@ -1,7 +1,8 @@
 import { NextResponse } from "next/server";
 import type { IDKitResult } from "@worldcoin/idkit";
+import { getSupabaseServerClient } from "@/lib/supabase/server";
 
-// In-memory nullifier cache with timestamps for abuse-prevention throttling (10-min window)
+// In-memory fallback cache with timestamps for abuse-prevention throttling (10-min window)
 const nullifierCache = new Map<string, number>();
 const THROTTLE_WINDOW_MS = 10 * 60 * 1000;
 
@@ -29,9 +30,29 @@ export async function POST(request: Request): Promise<Response> {
     const action = ("action" in idkitResponse && typeof idkitResponse.action === "string" ? idkitResponse.action : undefined) || "finder-report";
     const cacheKey = `${action}:${nullifier}`;
     const now = Date.now();
+    const supabase = getSupabaseServerClient();
 
     // 1. Abuse-prevention Throttling check (Section 2 of Homeward spec)
-    const lastReportTime = nullifierCache.get(cacheKey);
+    // First check persistent Postgres table via Supabase, with in-memory fallback
+    let lastReportTime: number | null = null;
+
+    if (supabase) {
+      const { data: record, error } = await supabase
+        .from("nullifiers")
+        .select("last_report_at")
+        .eq("action", action)
+        .eq("nullifier", nullifier)
+        .maybeSingle();
+
+      if (!error && record?.last_report_at) {
+        lastReportTime = new Date(record.last_report_at).getTime();
+      }
+    }
+
+    if (!lastReportTime) {
+      lastReportTime = nullifierCache.get(cacheKey) || null;
+    }
+
     if (lastReportTime && now - lastReportTime < THROTTLE_WINDOW_MS) {
       const waitMinutes = Math.ceil((THROTTLE_WINDOW_MS - (now - lastReportTime)) / 60000);
       return NextResponse.json(
@@ -72,7 +93,21 @@ export async function POST(request: Request): Promise<Response> {
       isVerified = true;
     }
 
-    // 3. Record nullifier timestamp
+    // 3. Record nullifier timestamp persistently in Supabase and memory fallback
+    if (supabase) {
+      try {
+        await supabase.from("nullifiers").upsert(
+          {
+            action,
+            nullifier,
+            last_report_at: new Date(now).toISOString(),
+          },
+          { onConflict: "action,nullifier" }
+        );
+      } catch (dbErr) {
+        console.warn("Could not persist nullifier to Supabase:", dbErr);
+      }
+    }
     nullifierCache.set(cacheKey, now);
 
     return NextResponse.json({
