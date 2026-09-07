@@ -453,7 +453,7 @@ export default function CaregiverDashboard() {
                   className="w-full py-3.5 px-4 rounded-xl bg-gradient-to-r from-cyan-500 to-blue-600 hover:from-cyan-400 hover:to-blue-500 text-white font-bold text-xs shadow-lg shadow-cyan-500/25 transition-all flex items-center justify-center gap-2"
                 >
                   <KeyRound className="w-4 h-4" />
-                  <span>Sign In via Supabase Auth</span>
+                  <span>Sign In / Create Account</span>
                 </Link>
               </div>
 
