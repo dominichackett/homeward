@@ -13,15 +13,15 @@ export const isSupabaseServerConfigured = Boolean(
     !supabaseServiceKey.includes("your-key")
 );
 
-let serverClient: SupabaseClient<Database> | null = null;
+let serverClient: SupabaseClient<any> | null = null;
 
-export function getSupabaseServerClient(): SupabaseClient<Database> | null {
+export function getSupabaseServerClient(): SupabaseClient<any> | null {
   if (!isSupabaseServerConfigured) {
     return null;
   }
 
   if (!serverClient) {
-    serverClient = createClient<Database>(supabaseUrl!, supabaseServiceKey!, {
+    serverClient = createClient<any>(supabaseUrl!, supabaseServiceKey!, {
       auth: {
         persistSession: false,
         autoRefreshToken: false,

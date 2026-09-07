@@ -2,20 +2,8 @@ import { NextResponse } from "next/server";
 import { getSupabaseServerClient } from "@/lib/supabase/server";
 import type { IncidentRecord } from "@/lib/supabase/types";
 
-const INITIAL_MOCK_INCIDENTS: IncidentRecord[] = [
-  {
-    id: "inc-001",
-    dependent_id: "dep-001",
-    case_token: "case-7f8a9b",
-    nullifier: "0x8f2d...1a9e",
-    match_confidence: 0.984,
-    status: "active",
-    location_note: "Near Central Metro Station, Entrance 3 (GPS: 40.7580° N, 73.9855° W)",
-    encrypted_photo_url: null,
-    created_at: new Date(Date.now() - 42 * 60000).toISOString(),
-    resolved_at: null,
-  },
-];
+// In-memory store for local development if database is unconfigured
+let mockIncidentsStore: IncidentRecord[] = [];
 
 export async function GET(): Promise<Response> {
   try {
@@ -27,19 +15,19 @@ export async function GET(): Promise<Response> {
         .select("*, dependents(*)")
         .order("created_at", { ascending: false });
 
-      if (!error && data && data.length > 0) {
+      if (!error && Array.isArray(data)) {
         return NextResponse.json({ incidents: data, source: "supabase" });
       }
     }
 
     return NextResponse.json({
-      incidents: INITIAL_MOCK_INCIDENTS,
+      incidents: mockIncidentsStore,
       source: "mock",
     });
   } catch (error) {
     console.error("GET /api/incidents error:", error);
     return NextResponse.json(
-      { incidents: INITIAL_MOCK_INCIDENTS, source: "mock", error: "Failed to fetch incidents" },
+      { incidents: [], source: "mock", error: "Failed to fetch incidents" },
       { status: 500 }
     );
   }

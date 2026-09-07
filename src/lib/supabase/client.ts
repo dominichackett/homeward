@@ -11,15 +11,15 @@ export const isSupabaseConfigured = Boolean(
     !supabaseAnonKey.includes("your-anon-key")
 );
 
-let browserClient: SupabaseClient<Database> | null = null;
+let browserClient: SupabaseClient<any> | null = null;
 
-export function getSupabaseBrowserClient(): SupabaseClient<Database> | null {
+export function getSupabaseBrowserClient(): SupabaseClient<any> | null {
   if (!isSupabaseConfigured) {
     return null;
   }
 
   if (!browserClient) {
-    browserClient = createClient<Database>(supabaseUrl!, supabaseAnonKey!);
+    browserClient = createClient<any>(supabaseUrl!, supabaseAnonKey!);
   }
 
   return browserClient;

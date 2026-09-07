@@ -2,66 +2,50 @@ import { NextResponse } from "next/server";
 import { getSupabaseServerClient } from "@/lib/supabase/server";
 import type { DependentRecord } from "@/lib/supabase/types";
 
-// Fallback seed data for local testing when Supabase DB is offline
-const INITIAL_MOCK_DEPENDENTS: DependentRecord[] = [
-  {
-    id: "dep-001",
-    full_name: "Eleanor Vance",
-    condition_notes:
-      "Alzheimer's (Moderate). May become disoriented in crowded spaces. Responds warmly to soft classical music.",
-    primary_contact_name: "Sarah Vance",
-    primary_contact_phone: "+1 (555) 234-5678",
-    primary_contact_email: "sarah.vance@example.com",
-    secondary_contact_name: "Robert Vance",
-    secondary_contact_phone: "+1 (555) 234-5679",
-    consent_attested: true,
-    encrypted_embedding: "enc_v1_8f93a10c9e782b4df0123456789abcde",
-    photo_thumbnail_url: null,
-    created_at: new Date(Date.now() - 14 * 86400000).toISOString(),
-    updated_at: new Date(Date.now() - 14 * 86400000).toISOString(),
-  },
-  {
-    id: "dep-002",
-    full_name: "Lucas Rivera",
-    condition_notes:
-      "Non-verbal Autism Spectrum. Non-verbal when stressed. Sensitive to sirens and flashing lights. Likes trains.",
-    primary_contact_name: "Elena Rivera",
-    primary_contact_phone: "+1 (555) 876-5432",
-    primary_contact_email: "elena.rivera@example.com",
-    secondary_contact_name: null,
-    secondary_contact_phone: null,
-    consent_attested: true,
-    encrypted_embedding: "enc_v1_3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e",
-    photo_thumbnail_url: null,
-    created_at: new Date(Date.now() - 3 * 86400000).toISOString(),
-    updated_at: new Date(Date.now() - 3 * 86400000).toISOString(),
-  },
-];
+// In-memory store for local testing if Supabase is offline
+let mockDependentsStore: DependentRecord[] = [];
 
-export async function GET(): Promise<Response> {
+export async function GET(request: Request): Promise<Response> {
   try {
+    const { searchParams } = new URL(request.url);
+    const caregiverId = searchParams.get("caregiver_id");
     const supabase = getSupabaseServerClient();
 
     if (supabase) {
-      const { data, error } = await supabase
+      let query = supabase
         .from("dependents")
         .select("*")
         .order("created_at", { ascending: false });
 
-      if (!error && data && data.length > 0) {
+      // If caregiverId is provided, filter strictly by this caregiver
+      if (caregiverId) {
+        query = query.eq("caregiver_id", caregiverId);
+      }
+
+      const { data, error } = await query;
+
+      if (!error && Array.isArray(data)) {
         return NextResponse.json({ dependents: data, source: "supabase" });
+      }
+      if (error) {
+        console.warn("Supabase query warning:", error.message);
       }
     }
 
-    // Fallback to mock data if database is empty or unconfigured
+    // Fallback to in-memory store if database connection unavailable
+    let list = [...mockDependentsStore];
+    if (caregiverId) {
+      list = list.filter((d) => d.caregiver_id === caregiverId);
+    }
+
     return NextResponse.json({
-      dependents: INITIAL_MOCK_DEPENDENTS,
+      dependents: list,
       source: "mock",
     });
   } catch (error) {
     console.error("GET /api/dependents error:", error);
     return NextResponse.json(
-      { dependents: INITIAL_MOCK_DEPENDENTS, source: "mock", error: "Failed to fetch from database" },
+      { dependents: mockDependentsStore, source: "mock", error: "Failed to fetch from database" },
       { status: 500 }
     );
   }
@@ -81,11 +65,12 @@ export async function POST(request: Request): Promise<Response> {
       consent_attested,
       encrypted_embedding,
       photo_thumbnail_url,
+      caregiver_id,
     } = body;
 
     if (!full_name || !primary_contact_name || !primary_contact_phone) {
       return NextResponse.json(
-        { error: "Missing required enrollment fields" },
+        { error: "Missing required enrollment fields: full name, primary contact name, or phone" },
         { status: 400 }
       );
     }
@@ -113,6 +98,7 @@ export async function POST(request: Request): Promise<Response> {
       consent_attested: true,
       encrypted_embedding: finalEmbedding,
       photo_thumbnail_url: photo_thumbnail_url || null,
+      caregiver_id: caregiver_id || null,
     };
 
     const supabase = getSupabaseServerClient();
@@ -136,13 +122,14 @@ export async function POST(request: Request): Promise<Response> {
       });
     }
 
-    // Mock fallback response
+    // Mock fallback response: persist in mock memory store so it displays immediately
     const mockCreated: DependentRecord = {
       id: `dep-${Date.now().toString(36)}`,
       ...newDependent,
       created_at: new Date().toISOString(),
       updated_at: new Date().toISOString(),
     };
+    mockDependentsStore.unshift(mockCreated);
 
     return NextResponse.json({
       success: true,
@@ -157,3 +144,35 @@ export async function POST(request: Request): Promise<Response> {
     );
   }
 }
+
+export async function DELETE(request: Request): Promise<Response> {
+  try {
+    const { searchParams } = new URL(request.url);
+    const id = searchParams.get("id");
+
+    if (!id) {
+      return NextResponse.json({ error: "Missing dependent id parameter" }, { status: 400 });
+    }
+
+    const supabase = getSupabaseServerClient();
+
+    if (supabase) {
+      const { error } = await supabase.from("dependents").delete().eq("id", id);
+      if (error) {
+        return NextResponse.json({ error: error.message }, { status: 500 });
+      }
+      return NextResponse.json({ success: true, source: "supabase" });
+    }
+
+    // Mock fallback: delete from in-memory store
+    mockDependentsStore = mockDependentsStore.filter((d) => d.id !== id);
+    return NextResponse.json({ success: true, source: "mock" });
+  } catch (error) {
+    console.error("DELETE /api/dependents error:", error);
+    return NextResponse.json(
+      { error: "Internal server error deleting dependent" },
+      { status: 500 }
+    );
+  }
+}
+

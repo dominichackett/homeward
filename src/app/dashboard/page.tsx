@@ -26,9 +26,16 @@ import {
   Trash2,
   Info,
   KeyRound,
-  LogOut
+  LogOut,
+  Loader2,
+  RefreshCw,
 } from "lucide-react";
 import { getSupabaseBrowserClient } from "@/lib/supabase/client";
+import {
+  encryptBiometricEmbedding,
+  generateDeterministicVector,
+  createThumbnailDataUrl,
+} from "@/lib/biometrics";
 
 type Tab = "dependents" | "enroll" | "alerts";
 
@@ -43,58 +50,45 @@ interface EnrolledPerson {
     name: string;
     relationship: string;
     phone: string;
+    email?: string | null;
   };
   status: "active" | "alerting";
   enrolledAt: string;
   avatarColor: string;
   lastVerified: string;
+  photoThumbnailUrl?: string | null;
+  caregiverId?: string | null;
 }
-
-const INITIAL_DEPENDENTS: EnrolledPerson[] = [
-  {
-    id: "dep-001",
-    name: "Eleanor Vance",
-    nickname: "Ellie",
-    age: 78,
-    condition: "Alzheimer's (Moderate)",
-    notes: "May become disoriented in crowded spaces. Responds warmly to soft classical music. Hard of hearing in left ear.",
-    emergencyContact: {
-      name: "Sarah Vance",
-      relationship: "Daughter / Legal Guardian",
-      phone: "+1 (555) 234-5678",
-    },
-    status: "active",
-    enrolledAt: "2026-08-14",
-    avatarColor: "from-amber-500 to-rose-600",
-    lastVerified: "Enclave Hash: 0x7f2a...39b1",
-  },
-  {
-    id: "dep-002",
-    name: "Leo Martinez",
-    nickname: "Leo",
-    age: 9,
-    condition: "Non-verbal Autism Spectrum",
-    notes: "Sensitive to loud sirens and bright flashlights. Carries a small blue sensory toy. Does not answer to his name when panicked.",
-    emergencyContact: {
-      name: "Carlos Martinez",
-      relationship: "Father",
-      phone: "+1 (555) 876-5432",
-    },
-    status: "active",
-    enrolledAt: "2026-08-28",
-    avatarColor: "from-cyan-500 to-blue-600",
-    lastVerified: "Enclave Hash: 0x4b8e...901c",
-  },
-];
 
 export default function CaregiverDashboard() {
   const [activeTab, setActiveTab] = useState<Tab>("dependents");
-  const [dependents, setDependents] = useState<EnrolledPerson[]>(INITIAL_DEPENDENTS);
+  const [dependents, setDependents] = useState<EnrolledPerson[]>([]);
+  const [isLoadingDependents, setIsLoadingDependents] = useState(false);
   const [isSubmitted, setIsSubmitted] = useState(false);
+  const [isSubmitting, setIsSubmitting] = useState(false);
+  const [submitError, setSubmitError] = useState<string | null>(null);
 
   // Caregiver Auth State
   const [currentUser, setCurrentUser] = useState<{ email?: string; id?: string; name?: string } | null>(null);
   const [isCheckingAuth, setIsCheckingAuth] = useState(true);
+
+  // face-api.js AI Biometric Model State
+  const faceApiRef = useRef<typeof import("@vladmandic/face-api") | null>(null);
+  const [modelsLoaded, setModelsLoaded] = useState(false);
+  const [isModelsLoading, setIsModelsLoading] = useState(false);
+  const [modelError, setModelError] = useState<string | null>(null);
+
+  // Photo analysis state
+  const [isAnalyzingPhoto, setIsAnalyzingPhoto] = useState(false);
+  const [faceAnalysis, setFaceAnalysis] = useState<{
+    detected: boolean;
+    score?: number;
+    descriptor?: number[];
+    box?: { x: number; y: number; width: number; height: number };
+    error?: string;
+  } | null>(null);
+  const [encryptedEmbedding, setEncryptedEmbedding] = useState<string>("");
+  const [thumbnailUrl, setThumbnailUrl] = useState<string | null>(null);
 
   // Check Supabase Auth session on mount
   useEffect(() => {
@@ -105,11 +99,15 @@ export default function CaregiverDashboard() {
       supabase.auth.getSession().then(({ data: { session } }) => {
         if (isMounted) {
           if (session?.user) {
-            setCurrentUser({
+            const userObj = {
               email: session.user.email,
               id: session.user.id,
               name: session.user.user_metadata?.full_name || session.user.email?.split("@")[0],
-            });
+            };
+            setCurrentUser(userObj);
+            loadDependents(userObj.id);
+          } else {
+            loadDependents();
           }
           setIsCheckingAuth(false);
         }
@@ -118,13 +116,16 @@ export default function CaregiverDashboard() {
       const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => {
         if (isMounted) {
           if (session?.user) {
-            setCurrentUser({
+            const userObj = {
               email: session.user.email,
               id: session.user.id,
               name: session.user.user_metadata?.full_name || session.user.email?.split("@")[0],
-            });
+            };
+            setCurrentUser(userObj);
+            loadDependents(userObj.id);
           } else {
             setCurrentUser(null);
+            loadDependents();
           }
         }
       });
@@ -138,10 +139,15 @@ export default function CaregiverDashboard() {
       try {
         const stored = localStorage.getItem("homeward_caregiver_session");
         if (stored) {
-          setCurrentUser(JSON.parse(stored));
+          const parsed = JSON.parse(stored);
+          setCurrentUser(parsed);
+          loadDependents(parsed.id);
+        } else {
+          loadDependents();
         }
       } catch (err) {
         console.warn("Could not read local session:", err);
+        loadDependents();
       }
       setIsCheckingAuth(false);
     }
@@ -155,6 +161,92 @@ export default function CaregiverDashboard() {
     localStorage.removeItem("homeward_caregiver_session");
     setCurrentUser(null);
   };
+
+  // Reusable function to fetch dependents from /api/dependents (Supabase Postgres)
+  const loadDependents = async (caregiverId?: string) => {
+    try {
+      setIsLoadingDependents(true);
+      const url = caregiverId
+        ? `/api/dependents?caregiver_id=${encodeURIComponent(caregiverId)}`
+        : "/api/dependents";
+
+      const res = await fetch(url);
+      if (res.ok) {
+        const data = await res.json();
+        if (data.dependents && Array.isArray(data.dependents)) {
+          const mapped: EnrolledPerson[] = data.dependents.map((d: any, idx: number) => {
+            const ageMatch = d.condition_notes?.match(/Age:\s*(\d+)/i);
+            const parsedAge = ageMatch ? parseInt(ageMatch[1], 10) : 78 - idx * 4;
+            const condMatch = d.condition_notes?.match(/•\s*([^.]+)\./);
+            const condition = condMatch
+              ? condMatch[1].trim()
+              : d.condition_notes?.split(".")[0] || "Caregiver Protected";
+
+            return {
+              id: d.id,
+              name: d.full_name,
+              nickname: d.full_name.split(" ")[0],
+              age: parsedAge,
+              condition: condition,
+              notes: d.condition_notes || "",
+              emergencyContact: {
+                name: d.primary_contact_name,
+                relationship: d.secondary_contact_name || "Primary Guardian",
+                phone: d.primary_contact_phone,
+                email: d.primary_contact_email,
+              },
+              status: "active",
+              enrolledAt: d.created_at ? d.created_at.split("T")[0] : "2026-08-14",
+              avatarColor:
+                idx % 2 === 0
+                  ? "from-amber-500 to-rose-600"
+                  : "from-cyan-500 to-blue-600",
+              lastVerified: `Enclave Hash: ${
+                d.encrypted_embedding ? d.encrypted_embedding.slice(0, 14) + "..." : "0x7f2a...39b1"
+              }`,
+              photoThumbnailUrl: d.photo_thumbnail_url,
+              caregiverId: d.caregiver_id,
+            };
+          });
+          setDependents(mapped);
+        }
+      }
+    } catch (err) {
+      console.warn("Could not load dependents from API:", err);
+    } finally {
+      setIsLoadingDependents(false);
+    }
+  };
+
+  // Pre-load face-api models when caregiver visits dashboard or enroll tab
+  const loadFaceApiModels = async () => {
+    if (faceApiRef.current && modelsLoaded) return faceApiRef.current;
+    try {
+      setIsModelsLoading(true);
+      setModelError(null);
+      const faceapi = await import("@vladmandic/face-api");
+      faceApiRef.current = faceapi;
+      await Promise.all([
+        faceapi.nets.tinyFaceDetector.loadFromUri("/models"),
+        faceapi.nets.faceLandmark68TinyNet.loadFromUri("/models"),
+        faceapi.nets.faceLandmark68Net.loadFromUri("/models"),
+        faceapi.nets.faceRecognitionNet.loadFromUri("/models"),
+        faceapi.nets.ssdMobilenetv1.loadFromUri("/models"),
+      ]);
+      setModelsLoaded(true);
+      setIsModelsLoading(false);
+      return faceapi;
+    } catch (err) {
+      console.error("Failed to load face-api models:", err);
+      setModelError("Could not load facial recognition AI models.");
+      setIsModelsLoading(false);
+      return null;
+    }
+  };
+
+  useEffect(() => {
+    loadFaceApiModels();
+  }, []);
 
   // Form State
   const [formData, setFormData] = useState({
@@ -173,56 +265,94 @@ export default function CaregiverDashboard() {
   const [uploadedPhoto, setUploadedPhoto] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
 
-  // Fetch enrolled dependents from Supabase API on mount
-  useEffect(() => {
-    let isMounted = true;
-    async function loadDependents() {
-      try {
-        const res = await fetch("/api/dependents");
-        if (res.ok) {
-          const data = await res.json();
-          if (isMounted && data.dependents && Array.isArray(data.dependents)) {
-            const mapped: EnrolledPerson[] = data.dependents.map((d: any, idx: number) => ({
-              id: d.id,
-              name: d.full_name,
-              nickname: d.full_name.split(" ")[0],
-              age: 78 - idx * 5,
-              condition: d.condition_notes?.split(".")[0] || "Caregiver Protected",
-              notes: d.condition_notes || "",
-              emergencyContact: {
-                name: d.primary_contact_name,
-                relationship: "Primary Guardian",
-                phone: d.primary_contact_phone,
-              },
-              status: "active",
-              enrolledAt: d.created_at ? d.created_at.split("T")[0] : "2026-08-14",
-              avatarColor:
-                idx % 2 === 0
-                  ? "from-amber-500 to-rose-600"
-                  : "from-cyan-500 to-blue-600",
-              lastVerified: `Enclave Hash: ${
-                d.encrypted_embedding ? d.encrypted_embedding.slice(0, 14) + "..." : "0x7f2a...39b1"
-              }`,
-            }));
-            setDependents(mapped);
-          }
-        }
-      } catch (err) {
-        console.warn("Could not load dependents from API:", err);
+  // Biometric Analysis on Uploaded Photo using face-api.js
+  const analyzeFaceImage = async (dataUrl: string) => {
+    setIsAnalyzingPhoto(true);
+    setSubmitError(null);
+    setFaceAnalysis(null);
+
+    try {
+      const api = await loadFaceApiModels();
+      if (!api) {
+        setFaceAnalysis({
+          detected: false,
+          error: "Facial detection models could not be loaded. Please check your connection and try again.",
+        });
+        setIsAnalyzingPhoto(false);
+        return;
       }
+
+      const img = new Image();
+      img.crossOrigin = "anonymous";
+      await new Promise((resolve, reject) => {
+        img.onload = resolve;
+        img.onerror = reject;
+        img.src = dataUrl;
+      });
+
+      // Pass 1: Tiny Face Detector
+      let result = await api
+        .detectSingleFace(
+          img,
+          new api.TinyFaceDetectorOptions({ inputSize: 416, scoreThreshold: 0.35 })
+        )
+        .withFaceLandmarks(true)
+        .withFaceDescriptor();
+
+      // Pass 2: SSD Mobilenet V1 fallback
+      if (!result && api.nets.ssdMobilenetv1.isLoaded) {
+        result = await api
+          .detectSingleFace(img, new api.SsdMobilenetv1Options({ minConfidence: 0.35 }))
+          .withFaceLandmarks()
+          .withFaceDescriptor();
+      }
+
+      if (result) {
+        const scorePercent = Math.round(result.detection.score * 100);
+        const descriptor = Array.from(result.descriptor);
+        const ciphertext = encryptBiometricEmbedding(descriptor);
+        const thumb = await createThumbnailDataUrl(dataUrl, 240);
+
+        setFaceAnalysis({
+          detected: true,
+          score: scorePercent,
+          descriptor,
+          box: {
+            x: result.detection.box.x,
+            y: result.detection.box.y,
+            width: result.detection.box.width,
+            height: result.detection.box.height,
+          },
+        });
+        setEncryptedEmbedding(ciphertext);
+        setThumbnailUrl(thumb);
+      } else {
+        setFaceAnalysis({
+          detected: false,
+          error: "No clear face detected in the photo. Please upload a well-lit, unobstructed frontal portrait.",
+        });
+        setEncryptedEmbedding("");
+      }
+    } catch (err) {
+      console.error("Error analyzing face:", err);
+      setFaceAnalysis({
+        detected: false,
+        error: "Failed to process photo geometry. Please try a different photo.",
+      });
+      setEncryptedEmbedding("");
+    } finally {
+      setIsAnalyzingPhoto(false);
     }
-    loadDependents();
-    return () => {
-      isMounted = false;
-    };
-  }, []);
+  };
 
   const handlePhotoUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (file) {
       const reader = new FileReader();
       reader.onload = (event) => {
-        setUploadedPhoto(event.target?.result as string);
+        const result = event.target?.result as string;
+        setUploadedPhoto(result);
+        analyzeFaceImage(result);
       };
       reader.readAsDataURL(file);
     }
@@ -233,85 +363,129 @@ export default function CaregiverDashboard() {
       fullName: "Arthur Pendelton",
       nickname: "Artie",
       age: "82",
-      condition: "Dementia (Early Stage)",
-      notes: "Former civil engineer. Often wanders toward train stations or transit stops. Friendly but forgets his home address.",
+      condition: "Alzheimer's / Dementia",
+      notes: "Former civil engineer. Often wanders toward transit hubs or train stations. Friendly but forgets his home address. Needs water.",
       contactName: "David Pendelton",
       contactRel: "Son & Power of Attorney",
       contactPhone: "+1 (555) 432-1098",
       contactEmail: "david.p@example.com",
       consentAttestation: true,
     });
-    setUploadedPhoto("/placeholder-arthur.jpg");
+
+    const demoVector = generateDeterministicVector("Arthur Pendelton 1944 baseline");
+    const demoCipher = encryptBiometricEmbedding(demoVector);
+    const demoSvgAvatar = `data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" width="200" height="200" viewBox="0 0 200 200"><rect width="200" height="200" rx="30" fill="%230f172a"/><circle cx="100" cy="85" r="45" fill="%2338bdf8"/><path d="M40 180 c0-40 30-55 60-55 s60 15 60 55" fill="%230284c7"/><circle cx="85" cy="80" r="5" fill="%230f172a"/><circle cx="115" cy="80" r="5" fill="%230f172a"/><path d="M85 105 q15 10 30 0" stroke="%230f172a" stroke-width="3" fill="none"/></svg>`;
+
+    setUploadedPhoto(demoSvgAvatar);
+    setThumbnailUrl(demoSvgAvatar);
+    setEncryptedEmbedding(demoCipher);
+    setFaceAnalysis({
+      detected: true,
+      score: 97,
+      descriptor: demoVector,
+    });
+    setSubmitError(null);
   };
 
-  const handleSubmitEnrollment = (e: React.FormEvent) => {
+  const handleSubmitEnrollment = async (e: React.FormEvent) => {
     e.preventDefault();
+    setSubmitError(null);
+
     if (!formData.consentAttestation) {
-      alert("Guardian consent attestation is required to complete enrollment.");
+      setSubmitError("Guardian legal consent attestation is required to complete enrollment.");
       return;
     }
 
-    const newPerson: EnrolledPerson = {
-      id: `dep-${Date.now().toString().slice(-3)}`,
-      name: formData.fullName || "Arthur Pendelton",
-      nickname: formData.nickname || "Artie",
-      age: Number(formData.age) || 82,
-      condition: formData.condition,
-      notes: formData.notes,
-      emergencyContact: {
-        name: formData.contactName || "Family Contact",
-        relationship: formData.contactRel || "Guardian",
-        phone: formData.contactPhone || "+1 (555) 000-0000",
-      },
-      status: "active",
-      enrolledAt: new Date().toISOString().split("T")[0],
-      avatarColor: "from-emerald-500 to-teal-700",
-      lastVerified: "Enclave Hash: 0x9c3d...fa21",
-    };
+    if (!uploadedPhoto || !faceAnalysis?.detected) {
+      setSubmitError("A clear reference photo with verified facial geometry is required.");
+      return;
+    }
 
-    // Persist to Supabase API
-    fetch("/api/dependents", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({
-        full_name: newPerson.name,
-        condition_notes: `${newPerson.condition}. ${newPerson.notes}`,
-        primary_contact_name: newPerson.emergencyContact.name,
-        primary_contact_phone: newPerson.emergencyContact.phone,
+    if (!formData.fullName || !formData.contactName || !formData.contactPhone) {
+      setSubmitError("Please fill in all required fields (full name, emergency contact, and phone).");
+      return;
+    }
+
+    setIsSubmitting(true);
+
+    try {
+      const payload = {
+        full_name: formData.fullName,
+        condition_notes: `Age: ${formData.age || "Unknown"} • ${formData.condition}. ${formData.notes}`,
+        primary_contact_name: formData.contactName,
+        primary_contact_phone: formData.contactPhone,
         primary_contact_email: formData.contactEmail || null,
+        secondary_contact_name: formData.contactRel || null,
+        secondary_contact_phone: null,
         consent_attested: true,
-      }),
-    })
-      .then(async (res) => {
-        if (res.ok) {
-          const data = await res.json();
-          if (data.dependent?.id) {
-            newPerson.id = data.dependent.id;
-          }
-        }
-      })
-      .catch((err) => console.warn("Could not save dependent to API:", err));
+        encrypted_embedding: encryptedEmbedding,
+        photo_thumbnail_url: thumbnailUrl || uploadedPhoto,
+        caregiver_id: currentUser?.id || null,
+      };
 
-    setDependents((prev) => [newPerson, ...prev]);
-    setIsSubmitted(true);
-    setTimeout(() => {
-      setIsSubmitted(false);
-      setActiveTab("dependents");
-      // Reset form
-      setFormData({
-        fullName: "",
-        nickname: "",
-        age: "",
-        condition: "Alzheimer's / Dementia",
-        notes: "",
-        contactName: "",
-        contactRel: "Legal Guardian",
-        contactPhone: "",
-        contactEmail: "",
-        consentAttestation: false,
+      const res = await fetch("/api/dependents", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(payload),
       });
-      setUploadedPhoto(null);
-    }, 1500);
+
+      const data = await res.json();
+      if (!res.ok || data.error) {
+        throw new Error(data.error || "Failed to persist dependent in database.");
+      }
+
+      // Refresh dependent records from Supabase
+      await loadDependents(currentUser?.id);
+
+      setIsSubmitted(true);
+      setTimeout(() => {
+        setIsSubmitted(false);
+        setActiveTab("dependents");
+        // Reset form
+        setFormData({
+          fullName: "",
+          nickname: "",
+          age: "",
+          condition: "Alzheimer's / Dementia",
+          notes: "",
+          contactName: "",
+          contactRel: "Legal Guardian",
+          contactPhone: "",
+          contactEmail: "",
+          consentAttestation: false,
+        });
+        setUploadedPhoto(null);
+        setThumbnailUrl(null);
+        setFaceAnalysis(null);
+        setEncryptedEmbedding("");
+      }, 1500);
+    } catch (err: any) {
+      console.error("Enrollment error:", err);
+      setSubmitError(err.message || "An unexpected error occurred during enrollment.");
+    } finally {
+      setIsSubmitting(false);
+    }
+  };
+
+  const handleDeleteDependent = async (id: string, name: string) => {
+    if (!confirm(`Are you sure you want to remove ${name} from active safety monitoring?`)) {
+      return;
+    }
+
+    try {
+      const res = await fetch(`/api/dependents?id=${encodeURIComponent(id)}`, {
+        method: "DELETE",
+      });
+      if (res.ok) {
+        setDependents((prev) => prev.filter((d) => d.id !== id));
+      } else {
+        const data = await res.json().catch(() => ({}));
+        alert(data.error || "Failed to delete dependent");
+      }
+    } catch (err) {
+      console.error("Delete error:", err);
+      alert("Network error deleting dependent");
+    }
   };
 
   return (
@@ -471,14 +645,24 @@ export default function CaregiverDashboard() {
           <div className="space-y-6">
             {/* Top Metric Cards */}
             <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
-              <div className="p-4 rounded-2xl bg-slate-900/60 border border-slate-800 flex items-center gap-3.5">
-                <div className="w-10 h-10 rounded-xl bg-cyan-950/80 border border-cyan-800/60 flex items-center justify-center text-cyan-400">
-                  <ShieldCheck className="w-5 h-5" />
+              <div className="p-4 rounded-2xl bg-slate-900/60 border border-slate-800 flex items-center justify-between">
+                <div className="flex items-center gap-3.5">
+                  <div className="w-10 h-10 rounded-xl bg-cyan-950/80 border border-cyan-800/60 flex items-center justify-center text-cyan-400">
+                    <ShieldCheck className="w-5 h-5" />
+                  </div>
+                  <div>
+                    <p className="text-[11px] font-medium text-slate-400 uppercase tracking-wider">Active Protections</p>
+                    <p className="text-xl font-bold text-white">{dependents.length} Individuals</p>
+                  </div>
                 </div>
-                <div>
-                  <p className="text-[11px] font-medium text-slate-400 uppercase tracking-wider">Active Protections</p>
-                  <p className="text-xl font-bold text-white">{dependents.length} Individuals</p>
-                </div>
+                <button
+                  onClick={() => loadDependents(currentUser?.id)}
+                  disabled={isLoadingDependents}
+                  className="p-2 rounded-xl bg-slate-850 hover:bg-slate-800 text-slate-400 hover:text-cyan-400 transition-colors"
+                  title="Refresh from Supabase"
+                >
+                  <RefreshCw className={`w-3.5 h-3.5 ${isLoadingDependents ? "animate-spin text-cyan-400" : ""}`} />
+                </button>
               </div>
 
               <div className="p-4 rounded-2xl bg-slate-900/60 border border-slate-800 flex items-center gap-3.5">
@@ -502,99 +686,135 @@ export default function CaregiverDashboard() {
               </div>
             </div>
 
-            {/* Dependents Grid */}
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-5">
-              {dependents.map((dep) => (
-                <div
-                  key={dep.id}
-                  className="rounded-3xl bg-slate-900/80 border border-slate-800 hover:border-slate-700 transition-all p-5 flex flex-col justify-between shadow-xl"
-                >
-                  <div>
-                    {/* Top Row: Avatar + Name + Status */}
-                    <div className="flex items-start justify-between gap-3">
-                      <div className="flex items-center gap-3.5">
-                        <div
-                          className={`w-14 h-14 rounded-2xl bg-gradient-to-tr ${dep.avatarColor} flex items-center justify-center text-white font-bold text-lg shadow-lg`}
-                        >
-                          {dep.nickname.slice(0, 2).toUpperCase()}
-                        </div>
-                        <div>
-                          <div className="flex items-center gap-2">
-                            <h3 className="font-bold text-base text-white">{dep.name}</h3>
-                            <span className="text-xs text-slate-400">(&ldquo;{dep.nickname}&rdquo;)</span>
-                          </div>
-                          <p className="text-xs font-medium text-cyan-400 mt-0.5">
-                            Age {dep.age} &bull; {dep.condition}
-                          </p>
-                        </div>
-                      </div>
-
-                      <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[11px] font-semibold bg-emerald-950/80 text-emerald-400 border border-emerald-800/80">
-                        <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
-                        Active Protection
-                      </span>
-                    </div>
-
-                    {/* Medical / De-escalation Notes */}
-                    <div className="mt-4 p-3 rounded-2xl bg-slate-950/80 border border-slate-850">
-                      <div className="flex items-center gap-1.5 text-slate-300 text-xs font-semibold mb-1">
-                        <FileText className="w-3.5 h-3.5 text-cyan-400" />
-                        <span>Critical De-escalation & Medical Notes:</span>
-                      </div>
-                      <p className="text-xs text-slate-400 leading-relaxed pl-5">
-                        {dep.notes}
-                      </p>
-                    </div>
-
-                    {/* Emergency Contacts */}
-                    <div className="mt-3 p-3 rounded-2xl bg-slate-950/40 border border-slate-850 flex items-center justify-between text-xs">
-                      <div className="flex items-center gap-2 text-slate-300">
-                        <Phone className="w-3.5 h-3.5 text-cyan-400" />
-                        <span className="font-medium">{dep.emergencyContact.name} ({dep.emergencyContact.relationship}):</span>
-                        <span className="font-mono text-cyan-300">{dep.emergencyContact.phone}</span>
-                      </div>
-                      <span className="text-[10px] text-emerald-400 uppercase font-semibold">Verified</span>
-                    </div>
-                  </div>
-
-                  {/* Card Bottom Meta */}
-                  <div className="mt-5 pt-3.5 border-t border-slate-800/80 flex items-center justify-between text-xs text-slate-500">
-                    <div className="flex items-center gap-1.5 font-mono text-[11px]">
-                      <Lock className="w-3 h-3 text-cyan-500" />
-                      <span>{dep.lastVerified}</span>
-                    </div>
-                    <div className="flex items-center gap-2">
-                      <button
-                        onClick={() => setActiveTab("enroll")}
-                        className="text-xs text-cyan-400 hover:text-cyan-300 font-medium"
-                      >
-                        Edit Profile
-                      </button>
-                    </div>
-                  </div>
-                </div>
-              ))}
-
-              {/* Add Another Card CTA */}
-              <div
-                onClick={() => setActiveTab("enroll")}
-                className="rounded-3xl border-2 border-dashed border-slate-800 hover:border-cyan-500/50 hover:bg-slate-900/30 transition-all p-8 flex flex-col items-center justify-center text-center cursor-pointer group min-h-[260px]"
-              >
-                <div className="w-12 h-12 rounded-2xl bg-slate-800 group-hover:bg-cyan-950/60 border border-slate-700 group-hover:border-cyan-700 flex items-center justify-center text-slate-400 group-hover:text-cyan-400 transition-colors mb-3">
-                  <UserPlus className="w-6 h-6" />
-                </div>
-                <h3 className="font-bold text-base text-slate-200 group-hover:text-white">
-                  Enroll Another Dependent
-                </h3>
-                <p className="text-xs text-slate-400 mt-1 max-w-xs">
-                  Generate an encrypted 128D biometric vector in seconds. Protected by guardian legal consent attestation.
-                </p>
-                <span className="mt-4 inline-flex items-center gap-1 text-xs font-semibold text-cyan-400 group-hover:translate-x-0.5 transition-transform">
-                  <span>Start Enrollment</span>
-                  <ArrowRight className="w-3.5 h-3.5" />
-                </span>
+            {/* Dependents Grid or Empty State */}
+            {isLoadingDependents ? (
+              <div className="rounded-3xl border border-slate-800 bg-slate-900/50 p-12 text-center flex flex-col items-center justify-center">
+                <Loader2 className="w-8 h-8 text-cyan-400 animate-spin mb-3" />
+                <p className="text-sm font-semibold text-white">Loading enrolled dependents from Supabase...</p>
+                <p className="text-xs text-slate-400 mt-1">Retrieving hardware enclave encrypted biometric records.</p>
               </div>
-            </div>
+            ) : dependents.length === 0 ? (
+              <div className="rounded-3xl border-2 border-dashed border-slate-800 bg-slate-900/30 p-10 sm:p-14 text-center flex flex-col items-center justify-center">
+                <div className="w-16 h-16 rounded-2xl bg-slate-800/90 border border-slate-700 flex items-center justify-center text-cyan-400 mb-4 shadow-lg">
+                  <Users className="w-8 h-8" />
+                </div>
+                <h3 className="text-lg font-bold text-white tracking-tight">No Dependents Enrolled Yet</h3>
+                <p className="text-xs text-slate-400 max-w-md mt-1.5 mb-6 leading-relaxed">
+                  You currently have no loved ones enrolled under your caregiver account. Enroll your first family member or dependent to protect them with hardware-enclave biometric re-identification.
+                </p>
+                <button
+                  onClick={() => setActiveTab("enroll")}
+                  className="px-6 py-3 rounded-2xl bg-gradient-to-r from-cyan-500 to-blue-600 hover:from-cyan-400 hover:to-blue-500 text-white font-bold text-xs shadow-xl shadow-cyan-500/25 transition-all flex items-center gap-2"
+                >
+                  <UserPlus className="w-4 h-4" />
+                  <span>Enroll Your First Dependent</span>
+                </button>
+              </div>
+            ) : (
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-5">
+                {dependents.map((dep) => (
+                  <div
+                    key={dep.id}
+                    className="rounded-3xl bg-slate-900/80 border border-slate-800 hover:border-slate-700 transition-all p-5 flex flex-col justify-between shadow-xl"
+                  >
+                    <div>
+                      {/* Top Row: Avatar + Name + Status */}
+                      <div className="flex items-start justify-between gap-3">
+                        <div className="flex items-center gap-3.5">
+                          {dep.photoThumbnailUrl ? (
+                            // eslint-disable-next-line @next/next/no-img-element
+                            <img
+                              src={dep.photoThumbnailUrl}
+                              alt={dep.name}
+                              className="w-14 h-14 rounded-2xl object-cover border border-slate-700 shadow-lg shrink-0"
+                            />
+                          ) : (
+                            <div
+                              className={`w-14 h-14 rounded-2xl bg-gradient-to-tr ${dep.avatarColor} flex items-center justify-center text-white font-bold text-lg shadow-lg shrink-0`}
+                            >
+                              {dep.nickname.slice(0, 2).toUpperCase()}
+                            </div>
+                          )}
+                          <div>
+                            <div className="flex items-center gap-2">
+                              <h3 className="font-bold text-base text-white">{dep.name}</h3>
+                              <span className="text-xs text-slate-400">(&ldquo;{dep.nickname}&rdquo;)</span>
+                            </div>
+                            <p className="text-xs font-medium text-cyan-400 mt-0.5">
+                              Age {dep.age} &bull; {dep.condition}
+                            </p>
+                          </div>
+                        </div>
+
+                        <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[11px] font-semibold bg-emerald-950/80 text-emerald-400 border border-emerald-800/80 shrink-0">
+                          <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
+                          Active Protection
+                        </span>
+                      </div>
+
+                      {/* Medical / De-escalation Notes */}
+                      <div className="mt-4 p-3 rounded-2xl bg-slate-950/80 border border-slate-850">
+                        <div className="flex items-center gap-1.5 text-slate-300 text-xs font-semibold mb-1">
+                          <FileText className="w-3.5 h-3.5 text-cyan-400" />
+                          <span>Critical De-escalation & Medical Notes:</span>
+                        </div>
+                        <p className="text-xs text-slate-400 leading-relaxed pl-5">
+                          {dep.notes}
+                        </p>
+                      </div>
+
+                      {/* Emergency Contacts */}
+                      <div className="mt-3 p-3 rounded-2xl bg-slate-950/40 border border-slate-850 flex items-center justify-between text-xs">
+                        <div className="flex items-center gap-2 text-slate-300">
+                          <Phone className="w-3.5 h-3.5 text-cyan-400" />
+                          <span className="font-medium">{dep.emergencyContact.name} ({dep.emergencyContact.relationship}):</span>
+                          <span className="font-mono text-cyan-300">{dep.emergencyContact.phone}</span>
+                        </div>
+                        <span className="text-[10px] text-emerald-400 uppercase font-semibold">Verified</span>
+                      </div>
+                    </div>
+
+                    {/* Card Bottom Meta */}
+                    <div className="mt-5 pt-3.5 border-t border-slate-800/80 flex items-center justify-between text-xs text-slate-500">
+                      <div className="flex items-center gap-1.5 font-mono text-[11px]">
+                        <Lock className="w-3 h-3 text-cyan-500" />
+                        <span>{dep.lastVerified}</span>
+                      </div>
+                      <div className="flex items-center gap-2">
+                        <button
+                          onClick={() => handleDeleteDependent(dep.id, dep.name)}
+                          className="text-xs text-slate-500 hover:text-rose-400 font-medium transition-colors flex items-center gap-1"
+                          title="Remove dependent"
+                        >
+                          <Trash2 className="w-3 h-3" />
+                          <span>Remove</span>
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+                ))}
+
+                {/* Add Another Card CTA */}
+                <div
+                  onClick={() => setActiveTab("enroll")}
+                  className="rounded-3xl border-2 border-dashed border-slate-800 hover:border-cyan-500/50 hover:bg-slate-900/30 transition-all p-8 flex flex-col items-center justify-center text-center cursor-pointer group min-h-[260px]"
+                >
+                  <div className="w-12 h-12 rounded-2xl bg-slate-800 group-hover:bg-cyan-950/60 border border-slate-700 group-hover:border-cyan-700 flex items-center justify-center text-slate-400 group-hover:text-cyan-400 transition-colors mb-3">
+                    <UserPlus className="w-6 h-6" />
+                  </div>
+                  <h3 className="font-bold text-base text-slate-200 group-hover:text-white">
+                    Enroll Another Dependent
+                  </h3>
+                  <p className="text-xs text-slate-400 mt-1 max-w-xs">
+                    Generate an encrypted 128D biometric vector in seconds. Protected by guardian legal consent attestation.
+                  </p>
+                  <span className="mt-4 inline-flex items-center gap-1 text-xs font-semibold text-cyan-400 group-hover:translate-x-0.5 transition-transform">
+                    <span>Start Enrollment</span>
+                    <ArrowRight className="w-3.5 h-3.5" />
+                  </span>
+                </div>
+              </div>
+            )}
           </div>
         )}
 
@@ -649,32 +869,93 @@ export default function CaregiverDashboard() {
                     onChange={handlePhotoUpload}
                   />
 
-                  {uploadedPhoto ? (
-                    <div className="relative rounded-2xl overflow-hidden border-2 border-emerald-500/60 p-4 bg-slate-950 flex items-center justify-between gap-4">
-                      <div className="flex items-center gap-4">
-                        <div className="w-16 h-16 rounded-xl overflow-hidden bg-slate-800 shrink-0">
-                          {/* eslint-disable-next-line @next/next/no-img-element */}
-                          <img
-                            src={uploadedPhoto}
-                            alt="Reference face"
-                            className="w-full h-full object-cover"
-                          />
-                        </div>
-                        <div>
-                          <div className="flex items-center gap-1.5 text-emerald-400 text-xs font-bold">
-                            <CheckCircle2 className="w-4 h-4" />
-                            <span>Clear Facial Geometry Verified</span>
+                  {isAnalyzingPhoto ? (
+                    <div className="rounded-2xl border-2 border-cyan-500/60 p-5 bg-slate-950/80 flex items-center gap-4 animate-pulse">
+                      <Loader2 className="w-6 h-6 text-cyan-400 animate-spin shrink-0" />
+                      <div>
+                        <p className="text-xs font-bold text-white">Analyzing Facial Geometry with face-api.js...</p>
+                        <p className="text-[11px] text-slate-400 mt-0.5">
+                          Verifying frontal face alignment and extracting 128D biometric vector in browser.
+                        </p>
+                      </div>
+                    </div>
+                  ) : faceAnalysis?.detected ? (
+                    <div className="rounded-2xl border-2 border-emerald-500/60 p-4 bg-slate-950 flex flex-col gap-3">
+                      <div className="flex items-center justify-between gap-4">
+                        <div className="flex items-center gap-4">
+                          <div className="w-16 h-16 rounded-xl overflow-hidden bg-slate-800 shrink-0 border border-slate-700">
+                            {/* eslint-disable-next-line @next/next/no-img-element */}
+                            <img
+                              src={thumbnailUrl || uploadedPhoto || ""}
+                              alt="Reference face"
+                              className="w-full h-full object-cover"
+                            />
                           </div>
-                          <p className="text-[11px] text-slate-400 mt-0.5">
-                            Face alignment suitable for 128D vector extraction.
-                          </p>
+                          <div>
+                            <div className="flex items-center gap-1.5 text-emerald-400 text-xs font-bold">
+                              <CheckCircle2 className="w-4 h-4" />
+                              <span>Clear Facial Geometry Verified ({faceAnalysis.score}% Confidence)</span>
+                            </div>
+                            <p className="text-[11px] text-slate-400 mt-0.5">
+                              Face alignment verified &middot; 128D biometric vector extracted.
+                            </p>
+                            <div className="flex items-center gap-2 mt-1 font-mono text-[10px] text-cyan-300">
+                              <Lock className="w-3 h-3 text-cyan-400" />
+                              <span>Ciphertext: {encryptedEmbedding.slice(0, 16)}...</span>
+                            </div>
+                          </div>
                         </div>
+
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setUploadedPhoto(null);
+                            setThumbnailUrl(null);
+                            setFaceAnalysis(null);
+                            setEncryptedEmbedding("");
+                          }}
+                          className="p-2 text-slate-400 hover:text-red-400 transition-colors"
+                          title="Remove photo"
+                        >
+                          <Trash2 className="w-4 h-4" />
+                        </button>
                       </div>
 
+                      {faceAnalysis.descriptor && (
+                        <div className="p-2.5 rounded-xl bg-slate-900 border border-slate-800 text-[10px] font-mono text-slate-400 flex items-center justify-between gap-2">
+                          <div>
+                            <span className="text-cyan-400 font-semibold">128D Vector Snippet: </span>
+                            [{faceAnalysis.descriptor.slice(0, 5).map((n) => n.toFixed(4)).join(", ")}...]
+                          </div>
+                          <span className="text-[10px] text-emerald-400 bg-emerald-950/80 px-2 py-0.5 rounded border border-emerald-800/80 shrink-0">
+                            TEE Enclave Ready
+                          </span>
+                        </div>
+                      )}
+                    </div>
+                  ) : faceAnalysis?.error ? (
+                    <div className="rounded-2xl border-2 border-rose-500/60 p-4 bg-rose-950/20 flex items-start justify-between gap-4">
+                      <div className="flex items-start gap-3">
+                        <AlertTriangle className="w-5 h-5 text-rose-400 shrink-0 mt-0.5" />
+                        <div>
+                          <p className="text-xs font-bold text-rose-300">Face Not Detected</p>
+                          <p className="text-[11px] text-slate-400 mt-0.5">{faceAnalysis.error}</p>
+                          <button
+                            type="button"
+                            onClick={() => fileInputRef.current?.click()}
+                            className="mt-2 text-xs font-semibold text-cyan-400 hover:underline inline-flex items-center gap-1"
+                          >
+                            <Upload className="w-3 h-3" /> Upload another photo
+                          </button>
+                        </div>
+                      </div>
                       <button
                         type="button"
-                        onClick={() => setUploadedPhoto(null)}
-                        className="p-2 text-slate-400 hover:text-red-400 transition-colors"
+                        onClick={() => {
+                          setUploadedPhoto(null);
+                          setFaceAnalysis(null);
+                        }}
+                        className="text-slate-400 hover:text-red-400 p-1"
                       >
                         <Trash2 className="w-4 h-4" />
                       </button>
@@ -691,7 +972,7 @@ export default function CaregiverDashboard() {
                         Upload Clear Frontal Photo
                       </p>
                       <p className="text-[11px] text-slate-500 mt-0.5">
-                        JPG or PNG. Minimum 400x400. Face must be unobstructed.
+                        JPG or PNG. face-api.js validates facial geometry and extracts 128D vector.
                       </p>
                     </div>
                   )}
@@ -854,13 +1135,31 @@ export default function CaregiverDashboard() {
                   </div>
                 </div>
 
+                {/* Error Banner */}
+                {submitError && (
+                  <div className="p-3.5 rounded-2xl bg-rose-950/60 border border-rose-800 text-xs text-rose-300 flex items-center gap-2.5">
+                    <AlertTriangle className="w-4 h-4 text-rose-400 shrink-0" />
+                    <span>{submitError}</span>
+                  </div>
+                )}
+
                 {/* Submit Action */}
                 <button
                   type="submit"
-                  className="w-full py-4 px-6 rounded-2xl bg-gradient-to-r from-cyan-500 to-blue-600 hover:from-cyan-400 hover:to-blue-500 text-white font-bold text-sm shadow-xl shadow-cyan-500/25 transition-all active:scale-[0.99] flex items-center justify-center gap-2"
+                  disabled={isSubmitting || isAnalyzingPhoto}
+                  className="w-full py-4 px-6 rounded-2xl bg-gradient-to-r from-cyan-500 to-blue-600 hover:from-cyan-400 hover:to-blue-500 disabled:opacity-50 disabled:cursor-not-allowed text-white font-bold text-sm shadow-xl shadow-cyan-500/25 transition-all active:scale-[0.99] flex items-center justify-center gap-2"
                 >
-                  <Lock className="w-4 h-4" />
-                  <span>Encrypt & Enroll Biometric Vector</span>
+                  {isSubmitting ? (
+                    <>
+                      <Loader2 className="w-4 h-4 animate-spin" />
+                      <span>Encrypting & Enrolling in Supabase...</span>
+                    </>
+                  ) : (
+                    <>
+                      <ShieldCheck className="w-4 h-4" />
+                      <span>Encrypt & Enroll Biometric Vector</span>
+                    </>
+                  )}
                 </button>
               </form>
             )}
@@ -882,48 +1181,18 @@ export default function CaregiverDashboard() {
               </span>
             </div>
 
-            {/* Sample Resolved Incident */}
-            <div className="p-5 rounded-3xl bg-slate-900/80 border border-slate-800 space-y-3">
-              <div className="flex items-center justify-between">
-                <div className="flex items-center gap-2.5">
-                  <div className="w-8 h-8 rounded-lg bg-emerald-950 border border-emerald-800 text-emerald-400 flex items-center justify-center">
-                    <CheckCircle2 className="w-4 h-4" />
-                  </div>
-                  <div>
-                    <span className="text-xs font-bold text-white">Case #HW-8492 &bull; Eleanor Vance</span>
-                    <p className="text-[11px] text-slate-400">Found near 4th & Market St &bull; 2 days ago</p>
-                  </div>
-                </div>
-
-                <span className="px-2.5 py-1 rounded-full text-[11px] font-semibold bg-slate-800 text-slate-300 border border-slate-700">
-                  Safely Resolved
-                </span>
+            {/* Incident Status / Empty State */}
+            <div className="rounded-3xl border border-slate-800 bg-slate-900/60 p-10 text-center flex flex-col items-center justify-center">
+              <div className="w-14 h-14 rounded-2xl bg-slate-800/80 border border-slate-700 flex items-center justify-center text-slate-400 mb-3.5 shadow-md">
+                <Bell className="w-6 h-6 text-cyan-400" />
               </div>
-
-              <div className="p-3.5 rounded-2xl bg-slate-950 text-xs space-y-2 border border-slate-850">
-                <div className="flex items-center justify-between text-slate-400">
-                  <span>Finder World ID Verification:</span>
-                  <span className="text-emerald-400 font-mono">Passed (Nullifier Verified)</span>
-                </div>
-                <div className="flex items-center justify-between text-slate-400">
-                  <span>TEE Confidential Matching:</span>
-                  <span className="text-cyan-400 font-mono">Euclidean Distance: 0.28 (Match)</span>
-                </div>
-                <div className="flex items-center justify-between text-slate-400">
-                  <span>Photo Delivery:</span>
-                  <span>Sent to Sarah Vance (SMS link) &bull; Photo Purged upon resolution</span>
-                </div>
-              </div>
-
-              <div className="flex items-center justify-between text-xs text-slate-500 pt-2 border-t border-slate-850">
-                <span className="font-mono text-[10px]">CRE Execution ID: 0x9f1a...c842</span>
-                <Link
-                  href="/alert/case-hw-8492"
-                  className="inline-flex items-center gap-1 text-xs text-cyan-400 hover:text-cyan-300 font-semibold"
-                >
-                  <span>View Alert Resolution Mockup</span>
-                  <ArrowRight className="w-3 h-3" />
-                </Link>
+              <h4 className="text-base font-bold text-white">No Emergency Incidents Reported</h4>
+              <p className="text-xs text-slate-400 max-w-sm mt-1 mb-4 leading-relaxed">
+                When an emergency finder scans an individual and an enclave biometric match is verified, incident notifications and cryptographic audit records are logged here.
+              </p>
+              <div className="inline-flex items-center gap-2 px-3 py-1.5 rounded-full text-[11px] font-mono bg-slate-950 text-slate-400 border border-slate-800">
+                <Lock className="w-3 h-3 text-cyan-400" />
+                <span>Zero Unauthorized Sightings &bull; TEE Audited</span>
               </div>
             </div>
           </div>

@@ -55,6 +55,7 @@ export interface Database {
           updated_at?: string;
         };
         Update: Partial<Omit<DependentRecord, "id">>;
+        Relationships: [];
       };
       nullifiers: {
         Row: NullifierRecord;
@@ -63,6 +64,7 @@ export interface Database {
           created_at?: string;
         };
         Update: Partial<Omit<NullifierRecord, "id">>;
+        Relationships: [];
       };
       incidents: {
         Row: IncidentRecord;
@@ -71,7 +73,21 @@ export interface Database {
           created_at?: string;
         };
         Update: Partial<Omit<IncidentRecord, "id">>;
+        Relationships: [];
       };
+    };
+    Views: {
+      [_ in never]: never;
+    };
+    Functions: {
+      [_ in never]: never;
+    };
+    Enums: {
+      [_ in never]: never;
+    };
+    CompositeTypes: {
+      [_ in never]: never;
     };
   };
 }
+
