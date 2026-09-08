@@ -6,9 +6,12 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "lint": "eslint"
+    "lint": "eslint",
+    "test:cre": "node scripts/test-cre-workflow.mjs",
+    "cre-compile": "cre-compile"
   },
   "dependencies": {
+    "@chainlink/cre-sdk": "^1.19.1",
     "@supabase/supabase-js": "^2.115.0",
     "@vladmandic/face-api": "^1.7.15",
     "@worldcoin/idkit": "^4.2.3",

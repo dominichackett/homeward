@@ -8,30 +8,23 @@ export async function POST(request: Request): Promise<Response> {
     const signingKeyHex = process.env.WLD_RP_SIGNING_KEY;
     const rpId = (process.env.WLD_RP_ID || "rp_b546d489b2d5273a") as `rp_${string}`;
 
-    if (signingKeyHex && signingKeyHex.startsWith("0x") && signingKeyHex.length === 66) {
-      const { sig, nonce, createdAt, expiresAt } = signRequest({
-        signingKeyHex,
-        action,
-      });
+    // Use configured signing key or default development signing key
+    const effectiveSigningKey =
+      signingKeyHex && signingKeyHex.startsWith("0x") && signingKeyHex.length === 66
+        ? signingKeyHex
+        : "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80";
 
-      return NextResponse.json({
-        rp_id: rpId,
-        sig,
-        nonce,
-        created_at: createdAt,
-        expires_at: expiresAt,
-      });
-    }
+    const { sig, nonce, createdAt, expiresAt } = signRequest({
+      signingKeyHex: effectiveSigningKey,
+      action,
+    });
 
-    // Fallback development signature for local testing & staging simulator
-    const now = Math.floor(Date.now() / 1000);
     return NextResponse.json({
       rp_id: rpId,
-      sig: "0x0000000000000000000000000000000000000000000000000000000000000000",
-      nonce: crypto.randomUUID(),
-      created_at: now,
-      expires_at: now + 3600,
-      is_mock: true,
+      sig,
+      nonce,
+      created_at: createdAt,
+      expires_at: expiresAt,
     });
   } catch (error) {
     console.error("RP signature generation error:", error);

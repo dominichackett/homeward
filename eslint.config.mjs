@@ -12,6 +12,10 @@ const eslintConfig = defineConfig([
     "out/**",
     "build/**",
     "next-env.d.ts",
+    "tmp.*",
+    "*.wasm",
+    "*.wasm.br.b64",
+    ".cre*",
   ]),
 ]);
 

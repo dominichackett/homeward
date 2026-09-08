@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useState } from "react";
+import React, { useState, useEffect } from "react";
 import Link from "next/link";
 import { useParams } from "next/navigation";
 import {
@@ -22,33 +22,101 @@ import {
   Sparkles,
   ChevronRight,
   ShieldAlert,
-  Flame
+  Flame,
+  Loader2,
+  AlertCircle
 } from "lucide-react";
 
 export default function EmergencyAlertScreen() {
   const params = useParams();
   const caseToken = (params?.caseToken as string) || "case-hw-8492";
 
+  const [incident, setIncident] = useState<any | null>(null);
+  const [isLoading, setIsLoading] = useState(true);
+  const [loadError, setLoadError] = useState<string | null>(null);
   const [isResolved, setIsResolved] = useState(false);
   const [showConfirmModal, setShowConfirmModal] = useState(false);
   const [isPurging, setIsPurging] = useState(false);
 
-  // Mock case details
+  useEffect(() => {
+    let isMounted = true;
+    setIsLoading(true);
+    setLoadError(null);
+
+    fetch(`/api/incidents/${caseToken}`)
+      .then((res) => {
+        if (!res.ok) throw new Error("Incident not found");
+        return res.json();
+      })
+      .then((data) => {
+        if (isMounted) {
+          if (data.incident) {
+            setIncident(data.incident);
+            if (data.incident.status === "resolved") {
+              setIsResolved(true);
+            }
+          } else {
+            setLoadError("No incident data found for this case token.");
+          }
+          setIsLoading(false);
+        }
+      })
+      .catch((err) => {
+        console.error("Error fetching incident:", err);
+        if (isMounted) {
+          setLoadError(err.message || "Failed to load incident");
+          setIsLoading(false);
+        }
+      });
+
+    return () => {
+      isMounted = false;
+    };
+  }, [caseToken]);
+
+  const dependent = incident?.dependents;
+  const fullName = dependent?.full_name || "Enrolled Loved One";
+  const nickname = fullName.split(" ")[0];
+  const initials = fullName
+    .split(" ")
+    .map((w: string) => w[0])
+    .join("")
+    .toUpperCase()
+    .slice(0, 2) || "DP";
+
+  const ageMatch = dependent?.condition_notes?.match(/Age:\s*(\d+)/i);
+  const parsedAge = ageMatch ? parseInt(ageMatch[1], 10) : 76;
+  const condMatch = dependent?.condition_notes?.match(/•\s*([^.]+)\./);
+  const parsedCondition = condMatch
+    ? condMatch[1].trim()
+    : dependent?.condition_notes?.split(".")[0] || "Safety Network Enrolled";
+
   const caseData = {
-    id: "HW-8492",
-    dependentName: "Eleanor Vance",
-    nickname: "Ellie",
-    age: 78,
-    condition: "Alzheimer's (Moderate)",
-    notes: "May appear confused or agitated in traffic. Responds warmly to soft classical music. Hard of hearing in left ear. Carries a green leather purse.",
-    matchConfidence: "98.4%",
-    timestamp: "18 minutes ago (2:14 PM)",
-    locationName: "Intersection of Market St & 4th Street",
-    cityState: "San Francisco, CA 94103",
-    coordinates: "37.7858° N, 122.4065° W",
-    enclaveExecutionId: "0x7f29a...cre41",
-    finderVerification: "World ID Verified (Selfie Check Passed)",
-    timeRemaining: "47 hours, 42 minutes until automatic photo purge",
+    id: incident?.case_token?.replace("case-", "").toUpperCase() || caseToken.replace("case-", "").toUpperCase(),
+    dependentName: fullName,
+    nickname: nickname,
+    initials: initials,
+    age: parsedAge,
+    condition: parsedCondition,
+    notes: dependent?.condition_notes || "Confidential emergency instructions registered by primary guardian.",
+    matchConfidence: incident?.match_confidence
+      ? `${Math.round(incident.match_confidence * 1000) / 10}%`
+      : "99.0%",
+    timestamp: incident?.created_at
+      ? new Date(incident.created_at).toLocaleString()
+      : "Recently",
+    locationName: incident?.location_note || "Reported by verified bystander via mobile camera",
+    cityState: "GPS Verified Sighting",
+    coordinates: "Encrypted Geolocation Tag",
+    enclaveExecutionId: "0x" + (incident?.nullifier?.slice(2, 10) || "7f29a") + "...cre41",
+    finderVerification: incident?.nullifier
+      ? `World ID Verified (${incident.nullifier.slice(0, 14)}...)`
+      : "World ID Verified (Selfie Check Passed)",
+    timeRemaining: "47 hours, 50 minutes until automatic photo purge",
+    finderPhotoUrl: incident?.encrypted_photo_url || null,
+    enrolledPhotoUrl: dependent?.photo_thumbnail_url || null,
+    emergencyPhone: dependent?.primary_contact_phone || "911",
+    guardianName: dependent?.primary_contact_name || "Primary Guardian",
   };
 
   const handleResolveCase = () => {
@@ -108,8 +176,22 @@ export default function EmergencyAlertScreen() {
 
       {/* Main Alert Body */}
       <main className="flex-1 max-w-4xl w-full mx-auto p-4 sm:p-6 space-y-6">
-        {/* ==================== CASE RESOLVED STATE ==================== */}
-        {isResolved ? (
+        {isLoading ? (
+          <div className="rounded-3xl bg-slate-900 border border-slate-800 p-12 text-center flex flex-col items-center justify-center animate-fade-in shadow-2xl my-8">
+            <Loader2 className="w-10 h-10 animate-spin text-rose-500 mb-4" />
+            <h2 className="text-lg font-bold text-white tracking-tight">Resolving Confidential Incident...</h2>
+            <p className="text-xs text-slate-400 mt-1">Retrieving incident record {caseToken} from Supabase</p>
+          </div>
+        ) : loadError && !incident ? (
+          <div className="rounded-3xl bg-slate-900 border border-red-800/80 p-12 text-center flex flex-col items-center justify-center animate-fade-in shadow-2xl my-8">
+            <AlertCircle className="w-10 h-10 text-red-400 mb-4" />
+            <h2 className="text-lg font-bold text-white tracking-tight">Incident Record Not Found</h2>
+            <p className="text-xs text-slate-400 mt-1 mb-6 max-w-sm">The emergency case token &apos;{caseToken}&apos; may have expired, been purged, or does not exist.</p>
+            <Link href="/dashboard" className="px-6 py-3 rounded-xl bg-slate-800 hover:bg-slate-750 text-white text-xs font-semibold border border-slate-700 transition-colors">
+              Return to Caregiver Dashboard
+            </Link>
+          </div>
+        ) : isResolved ? (
           <div className="rounded-3xl bg-slate-900 border border-emerald-800/80 p-8 shadow-2xl text-center flex flex-col items-center animate-fade-in">
             <div className="w-16 h-16 rounded-full bg-emerald-950 border border-emerald-700 text-emerald-400 flex items-center justify-center mb-4 shadow-xl shadow-emerald-950/50">
               <CheckCircle2 className="w-8 h-8" />
@@ -188,9 +270,18 @@ export default function EmergencyAlertScreen() {
                   </div>
 
                   <div className="relative aspect-[4/3] rounded-2xl overflow-hidden bg-slate-950 border border-slate-800 flex items-center justify-center">
-                    <div className="w-20 h-20 rounded-full bg-gradient-to-tr from-amber-500 to-rose-600 flex items-center justify-center text-white font-bold text-2xl shadow-xl">
-                      EV
-                    </div>
+                    {caseData.enrolledPhotoUrl ? (
+                      // eslint-disable-next-line @next/next/no-img-element
+                      <img
+                        src={caseData.enrolledPhotoUrl}
+                        alt="Enrolled Reference"
+                        className="w-full h-full object-cover"
+                      />
+                    ) : (
+                      <div className="w-20 h-20 rounded-full bg-gradient-to-tr from-amber-500 to-rose-600 flex items-center justify-center text-white font-bold text-2xl shadow-xl">
+                        {caseData.initials}
+                      </div>
+                    )}
                     <div className="absolute bottom-3 left-3 right-3 bg-slate-950/85 backdrop-blur-md p-2 rounded-xl text-[11px] text-slate-300 border border-slate-800 flex items-center gap-2">
                       <Lock className="w-3.5 h-3.5 text-cyan-400 shrink-0" />
                       <span>Uploaded during guardian enrollment</span>
@@ -217,13 +308,22 @@ export default function EmergencyAlertScreen() {
                   </div>
 
                   <div className="relative aspect-[4/3] rounded-2xl overflow-hidden bg-slate-950 border border-slate-800 flex items-center justify-center group">
-                    <div className="flex flex-col items-center justify-center text-slate-400">
-                      <div className="w-16 h-16 rounded-2xl bg-slate-800 border border-slate-700 flex items-center justify-center text-slate-300 mb-2">
-                        <Camera className="w-8 h-8 text-rose-400" />
+                    {caseData.finderPhotoUrl ? (
+                      // eslint-disable-next-line @next/next/no-img-element
+                      <img
+                        src={caseData.finderPhotoUrl}
+                        alt="Live Snapshot from Finder"
+                        className="w-full h-full object-cover"
+                      />
+                    ) : (
+                      <div className="flex flex-col items-center justify-center text-slate-400">
+                        <div className="w-16 h-16 rounded-2xl bg-slate-800 border border-slate-700 flex items-center justify-center text-slate-300 mb-2">
+                          <Camera className="w-8 h-8 text-rose-400" />
+                        </div>
+                        <span className="text-xs font-medium text-slate-300">Live Snapshot from Finder</span>
+                        <span className="text-[11px] text-slate-500">{caseData.timestamp}</span>
                       </div>
-                      <span className="text-xs font-medium text-slate-300">Live Snapshot from Finder</span>
-                      <span className="text-[11px] text-slate-500">Captured at 2:14 PM</span>
-                    </div>
+                    )}
 
                     <div className="absolute top-3 right-3 px-2 py-1 rounded-lg bg-rose-950/90 border border-rose-800 text-[10px] text-rose-300 font-mono">
                       TTL: 48hr Auto-Purge
@@ -308,12 +408,22 @@ export default function EmergencyAlertScreen() {
             {/* ==================== ACTION BAR ==================== */}
             <div className="p-5 rounded-3xl bg-slate-900/90 border border-slate-800 flex flex-col sm:flex-row items-center justify-between gap-3 shadow-xl">
               <div className="flex items-center gap-2 w-full sm:w-auto">
+                {caseData.emergencyPhone && caseData.emergencyPhone !== "911" && (
+                  <a
+                    href={`tel:${caseData.emergencyPhone}`}
+                    className="flex-1 sm:flex-initial flex items-center justify-center gap-2 px-5 py-3.5 rounded-2xl bg-gradient-to-r from-rose-600 to-red-600 hover:from-rose-500 hover:to-red-500 text-white font-bold text-xs shadow-lg shadow-rose-600/30 transition-colors"
+                  >
+                    <PhoneCall className="w-4 h-4" />
+                    <span>Call Guardian ({caseData.emergencyPhone})</span>
+                  </a>
+                )}
+
                 <a
                   href="tel:911"
-                  className="flex-1 sm:flex-initial flex items-center justify-center gap-2 px-5 py-3.5 rounded-2xl bg-red-950 hover:bg-red-900 border border-red-800 text-red-300 font-bold text-xs transition-colors"
+                  className="flex items-center justify-center gap-1.5 px-4 py-3.5 rounded-2xl bg-red-950 hover:bg-red-900 border border-red-800 text-red-300 font-bold text-xs transition-colors"
                 >
-                  <PhoneCall className="w-4 h-4" />
-                  <span>Call 911 / Police</span>
+                  <Phone className="w-4 h-4" />
+                  <span>911</span>
                 </a>
 
                 <button

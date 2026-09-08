@@ -90,9 +90,12 @@ export async function POST(request: Request): Promise<Response> {
       0.40 // Euclidean distance threshold
     );
 
+    let caseToken: string | null = null;
+    let matchedPerson: any = null;
+
     // 5. Handle Match Outcome
     if (enclaveResult.matched && enclaveResult.matchedDependentId) {
-      const caseToken = `case-${crypto.randomUUID().slice(0, 8)}`;
+      caseToken = `case-${crypto.randomUUID().slice(0, 8)}`;
       const newIncident = {
         dependent_id: enclaveResult.matchedDependentId,
         case_token: caseToken,
@@ -120,7 +123,7 @@ export async function POST(request: Request): Promise<Response> {
         });
       }
 
-      const matchedPerson = candidates.find(
+      matchedPerson = candidates.find(
         (c) => c.id === enclaveResult.matchedDependentId
       );
 
@@ -128,6 +131,8 @@ export async function POST(request: Request): Promise<Response> {
         `[CRE TEE MATCH] Confirmed match for: ${matchedPerson?.full_name || enclaveResult.matchedDependentId}. Case Token: ${caseToken}. Emergency Phone: ${matchedPerson?.primary_contact_phone || "Unknown"}`
       );
     }
+
+    const isDev = process.env.NODE_ENV === "development";
 
     // 6. Generic Confirmation to Finder (Privacy Invariant)
     // The finder NEVER learns whether a match was confirmed or who the individual is.
@@ -140,6 +145,17 @@ export async function POST(request: Request): Promise<Response> {
       },
       message:
         "Biometric comparison completed privately inside secure hardware enclave. If enrolled, next-of-kin have been notified.",
+      ...(isDev && {
+        _dev_debug: {
+          matched: enclaveResult.matched,
+          matchedName: matchedPerson?.full_name || null,
+          dependentId: enclaveResult.matchedDependentId,
+          confidence: enclaveResult.confidenceScore,
+          distance: enclaveResult.euclideanDistance,
+          caseToken,
+          alertUrl: caseToken ? `/alert/${caseToken}` : null,
+        },
+      }),
     });
   } catch (error) {
     console.error("POST /api/match error:", error);

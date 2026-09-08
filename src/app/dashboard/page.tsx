@@ -60,10 +60,30 @@ interface EnrolledPerson {
   caregiverId?: string | null;
 }
 
+interface IncidentItem {
+  id: string;
+  case_token: string;
+  dependent_id: string;
+  match_confidence: number;
+  status: "active" | "resolved";
+  location_note: string;
+  encrypted_photo_url?: string | null;
+  created_at: string;
+  dependents?: {
+    id: string;
+    full_name: string;
+    condition_notes?: string;
+    primary_contact_name?: string;
+    primary_contact_phone?: string;
+  };
+}
+
 export default function CaregiverDashboard() {
   const [activeTab, setActiveTab] = useState<Tab>("dependents");
   const [dependents, setDependents] = useState<EnrolledPerson[]>([]);
   const [isLoadingDependents, setIsLoadingDependents] = useState(false);
+  const [incidents, setIncidents] = useState<IncidentItem[]>([]);
+  const [isLoadingIncidents, setIsLoadingIncidents] = useState(false);
   const [isSubmitted, setIsSubmitted] = useState(false);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [submitError, setSubmitError] = useState<string | null>(null);
@@ -151,6 +171,7 @@ export default function CaregiverDashboard() {
       }
       setIsCheckingAuth(false);
     }
+    loadIncidents();
   }, []);
 
   const handleSignOut = async () => {
@@ -215,6 +236,24 @@ export default function CaregiverDashboard() {
       console.warn("Could not load dependents from API:", err);
     } finally {
       setIsLoadingDependents(false);
+    }
+  };
+
+  // Reusable function to fetch emergency incidents from /api/incidents (Supabase Postgres)
+  const loadIncidents = async () => {
+    try {
+      setIsLoadingIncidents(true);
+      const res = await fetch("/api/incidents");
+      if (res.ok) {
+        const data = await res.json();
+        if (data.incidents && Array.isArray(data.incidents)) {
+          setIncidents(data.incidents);
+        }
+      }
+    } catch (err) {
+      console.warn("Could not load incidents from API:", err);
+    } finally {
+      setIsLoadingIncidents(false);
     }
   };
 
@@ -592,7 +631,10 @@ export default function CaregiverDashboard() {
               </button>
 
               <button
-                onClick={() => setActiveTab("alerts")}
+                onClick={() => {
+                  setActiveTab("alerts");
+                  loadIncidents();
+                }}
                 className={`flex items-center gap-2 px-3.5 py-2 rounded-xl text-xs font-semibold transition-all ${
                   activeTab === "alerts"
                     ? "bg-gradient-to-r from-cyan-500 to-blue-600 text-white shadow-md shadow-cyan-500/20"
@@ -601,6 +643,11 @@ export default function CaregiverDashboard() {
               >
                 <Bell className="w-3.5 h-3.5" />
                 <span>Incident Audit Log</span>
+                {incidents.length > 0 && (
+                  <span className="px-1.5 py-0.5 text-[10px] rounded-full bg-red-500 text-white font-bold ml-0.5 animate-pulse">
+                    {incidents.length}
+                  </span>
+                )}
               </button>
             </div>
           )}
@@ -1181,20 +1228,99 @@ export default function CaregiverDashboard() {
               </span>
             </div>
 
-            {/* Incident Status / Empty State */}
-            <div className="rounded-3xl border border-slate-800 bg-slate-900/60 p-10 text-center flex flex-col items-center justify-center">
-              <div className="w-14 h-14 rounded-2xl bg-slate-800/80 border border-slate-700 flex items-center justify-center text-slate-400 mb-3.5 shadow-md">
-                <Bell className="w-6 h-6 text-cyan-400" />
+            {/* Incident Status / Empty State or Live List */}
+            {isLoadingIncidents ? (
+              <div className="rounded-3xl border border-slate-800 bg-slate-900/60 p-10 text-center flex flex-col items-center justify-center">
+                <Loader2 className="w-8 h-8 animate-spin text-cyan-400 mb-3" />
+                <p className="text-xs text-slate-400">Loading audit records from Supabase...</p>
               </div>
-              <h4 className="text-base font-bold text-white">No Emergency Incidents Reported</h4>
-              <p className="text-xs text-slate-400 max-w-sm mt-1 mb-4 leading-relaxed">
-                When an emergency finder scans an individual and an enclave biometric match is verified, incident notifications and cryptographic audit records are logged here.
-              </p>
-              <div className="inline-flex items-center gap-2 px-3 py-1.5 rounded-full text-[11px] font-mono bg-slate-950 text-slate-400 border border-slate-800">
-                <Lock className="w-3 h-3 text-cyan-400" />
-                <span>Zero Unauthorized Sightings &bull; TEE Audited</span>
+            ) : incidents.length === 0 ? (
+              <div className="rounded-3xl border border-slate-800 bg-slate-900/60 p-10 text-center flex flex-col items-center justify-center">
+                <div className="w-14 h-14 rounded-2xl bg-slate-800/80 border border-slate-700 flex items-center justify-center text-slate-400 mb-3.5 shadow-md">
+                  <Bell className="w-6 h-6 text-cyan-400" />
+                </div>
+                <h4 className="text-base font-bold text-white">No Emergency Incidents Reported</h4>
+                <p className="text-xs text-slate-400 max-w-sm mt-1 mb-4 leading-relaxed">
+                  When an emergency finder scans an individual and an enclave biometric match is verified, incident notifications and cryptographic audit records are logged here.
+                </p>
+                <div className="inline-flex items-center gap-2 px-3 py-1.5 rounded-full text-[11px] font-mono bg-slate-950 text-slate-400 border border-slate-800">
+                  <Lock className="w-3 h-3 text-cyan-400" />
+                  <span>Zero Unauthorized Sightings &bull; TEE Audited</span>
+                </div>
               </div>
-            </div>
+            ) : (
+              <div className="space-y-3">
+                {incidents.map((inc) => {
+                  const personName = inc.dependents?.full_name || "Enrolled Dependent";
+                  const confidencePct = Math.round(inc.match_confidence * 100);
+                  const isResolved = inc.status === "resolved";
+                  const dateStr = new Date(inc.created_at).toLocaleString();
+
+                  return (
+                    <div
+                      key={inc.id}
+                      className={`p-5 rounded-2xl border transition-all ${
+                        isResolved
+                          ? "bg-slate-900/40 border-slate-800/60 opacity-80"
+                          : "bg-slate-900/90 border-cyan-800/80 shadow-lg shadow-cyan-950/20"
+                      }`}
+                    >
+                      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 mb-3 pb-3 border-b border-slate-800">
+                        <div className="flex items-center gap-2">
+                          <span
+                            className={`px-2.5 py-1 rounded-full text-[11px] font-bold uppercase tracking-wider flex items-center gap-1.5 ${
+                              isResolved
+                                ? "bg-slate-800 text-slate-300 border border-slate-700"
+                                : "bg-red-950 text-red-300 border border-red-800 animate-pulse"
+                            }`}
+                          >
+                            <AlertTriangle className="w-3 h-3" />
+                            {isResolved ? "Safely Located / Resolved" : "Active Emergency Sighting"}
+                          </span>
+                          <span className="text-xs font-mono text-cyan-400 bg-cyan-950/60 px-2 py-0.5 rounded border border-cyan-800">
+                            {confidencePct}% Match Confidence
+                          </span>
+                        </div>
+                        <div className="flex items-center gap-1.5 text-xs text-slate-400">
+                          <Clock className="w-3.5 h-3.5" />
+                          <span>{dateStr}</span>
+                        </div>
+                      </div>
+
+                      <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
+                        <div className="space-y-1">
+                          <div className="flex items-center gap-2">
+                            <h4 className="text-base font-bold text-white tracking-tight">
+                              {personName}
+                            </h4>
+                            <span className="text-xs font-mono text-cyan-400">
+                              ({inc.case_token})
+                            </span>
+                          </div>
+                          <p className="text-xs text-slate-300 leading-relaxed">
+                            {inc.location_note}
+                          </p>
+                          <div className="flex items-center gap-2 text-[11px] text-slate-400 font-mono mt-1">
+                            <Lock className="w-3 h-3 text-cyan-400" />
+                            <span>World ID Nullifier: {inc.nullifier?.slice(0, 16)}... (Verified Human)</span>
+                          </div>
+                        </div>
+
+                        <div className="flex items-center gap-2 self-start sm:self-center">
+                          <Link
+                            href={`/alert/${inc.case_token}`}
+                            className="px-4 py-2.5 rounded-xl bg-gradient-to-r from-cyan-600 to-blue-600 hover:from-cyan-500 hover:to-blue-500 text-white font-bold text-xs shadow-md transition-all flex items-center gap-1.5"
+                          >
+                            <span>Open Alert Screen</span>
+                            <ArrowRight className="w-3.5 h-3.5" />
+                          </Link>
+                        </div>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
           </div>
         )}
           </>

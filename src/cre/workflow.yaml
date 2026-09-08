@@ -1,0 +1,19 @@
+# ==========================================================================
+# CHAINLINK CRE WORKFLOW SETTINGS
+# ==========================================================================
+staging-settings:
+  user-workflow:
+    workflow-name: "homeward-confidential-match-staging"
+  workflow-artifacts:
+    workflow-path: "./src/cre/workflow.ts"
+    config-path: "./src/cre/config.staging.json"
+  rpcs:
+    - chain-name: ethereum-testnet-sepolia
+      url: https://ethereum-sepolia-rpc.publicnode.com
+
+production-settings:
+  user-workflow:
+    workflow-name: "homeward-confidential-match-production"
+  workflow-artifacts:
+    workflow-path: "./src/cre/workflow.ts"
+    config-path: "./src/cre/config.production.json"

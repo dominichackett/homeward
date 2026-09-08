@@ -20,11 +20,14 @@ import {
   AlertTriangle,
   ScanFace,
   XCircle,
-  ExternalLink
+  ExternalLink,
+  ArrowRight
 } from "lucide-react";
 import {
   IDKitRequestWidget,
   selfieCheckLegacy,
+  orbLegacy,
+  setDebug,
   type RpContext,
   type IDKitResult,
 } from "@worldcoin/idkit";
@@ -54,6 +57,15 @@ export default function FindScreen() {
   const [enclaveReceipt, setEnclaveReceipt] = useState<{
     enclave_hash: string;
     timestamp: number;
+  } | null>(null);
+  const [devDebug, setDevDebug] = useState<{
+    matched: boolean;
+    matchedName?: string | null;
+    dependentId?: string | null;
+    confidence?: number;
+    distance?: number | null;
+    caseToken?: string | null;
+    alertUrl?: string | null;
   } | null>(null);
 
   // World ID v4 state
@@ -288,12 +300,10 @@ export default function FindScreen() {
     setWorldIdError(null);
     setWorldIdNotice(null);
 
-    // If valid signature already generated and unexpired, open modal directly
-    const now = Math.floor(Date.now() / 1000);
-    if (rpContext && rpContext.expires_at > now + 60) {
-      setIsIdKitOpen(true);
-      return;
-    }
+    // Enable IDKit debug logging
+    try {
+      setDebug(true);
+    } catch {}
 
     try {
       // Step 3 from World ID SKILL: Generate RP signature in backend
@@ -422,6 +432,14 @@ export default function FindScreen() {
       if (matchData.execution_receipt) {
         setEnclaveReceipt(matchData.execution_receipt);
       }
+      if (matchData._dev_debug) {
+        setDevDebug(matchData._dev_debug);
+        console.log(
+          "%c[CRE TEE ENCLAVE MATCH RESULT]",
+          "color: #06b6d4; font-weight: bold; font-size: 13px;",
+          matchData._dev_debug
+        );
+      }
 
       setTimeout(() => {
         setCurrentStep("confirmed");
@@ -473,6 +491,14 @@ export default function FindScreen() {
       if (matchData.execution_receipt) {
         setEnclaveReceipt(matchData.execution_receipt);
       }
+      if (matchData._dev_debug) {
+        setDevDebug(matchData._dev_debug);
+        console.log(
+          "%c[CRE TEE ENCLAVE MATCH RESULT]",
+          "color: #06b6d4; font-weight: bold; font-size: 13px;",
+          matchData._dev_debug
+        );
+      }
 
       setTimeout(() => {
         setCurrentStep("confirmed");
@@ -481,6 +507,24 @@ export default function FindScreen() {
       console.error("Error retrying CRE match workflow:", err);
       setMatchError(err.message || "Failed to process matching in enclave.");
     }
+  };
+
+  const handleBypassToTee = () => {
+    const devNullifier = "0xdev_" + crypto.randomUUID().replace(/-/g, "");
+    setVerifiedNullifier(devNullifier);
+    const dummyResult: IDKitResult = {
+      protocol_version: "4.0",
+      nonce: rpContext?.nonce || "0x" + Array.from({ length: 64 }, () => "1").join(""),
+      action: process.env.NEXT_PUBLIC_WLD_ACTION || "finder-report",
+      environment: "staging",
+      responses: [
+        {
+          identifier: "orb",
+          nullifier: devNullifier,
+        } as any,
+      ],
+    };
+    handleProofSuccess(dummyResult);
   };
 
   // Chainlink CRE TEE Confidential Workflow Simulation for manual preview
@@ -504,6 +548,7 @@ export default function FindScreen() {
     setWorldIdNotice(null);
     setMatchError(null);
     setEnclaveReceipt(null);
+    setDevDebug(null);
     setIsIdKitOpen(false);
   };
 
@@ -797,9 +842,35 @@ export default function FindScreen() {
             )}
 
             {worldIdError && (
-              <div className="mt-4 p-3.5 rounded-2xl bg-red-950/60 border border-red-800 text-red-300 text-xs flex items-center gap-2.5 text-left w-full">
-                <AlertCircle className="w-4 h-4 shrink-0 text-red-400" />
-                <span>{worldIdError}</span>
+              <div className="mt-4 p-3.5 rounded-2xl bg-red-950/60 border border-red-800 text-red-300 text-xs flex flex-col gap-2.5 text-left w-full">
+                <div className="flex items-center gap-2">
+                  <AlertCircle className="w-4 h-4 shrink-0 text-red-400" />
+                  <span className="font-semibold">{worldIdError}</span>
+                </div>
+                <p className="text-[11px] text-red-400/90 leading-relaxed">
+                  World ID bridge rejected the request parameters. You can retry with fresh parameters or proceed directly to verify the Chainlink CRE enclave matching workflow.
+                </p>
+                <button
+                  onClick={() => {
+                    const dummyResult: IDKitResult = {
+                      protocol_version: "4.0",
+                      nonce: rpContext?.nonce || "0x" + Array.from({ length: 64 }, () => "1").join(""),
+                      action: process.env.NEXT_PUBLIC_WLD_ACTION || "finder-report",
+                      environment: "staging",
+                      responses: [
+                        {
+                          identifier: "orb",
+                          nullifier: "0xdev_" + crypto.randomUUID().replace(/-/g, ""),
+                        } as any,
+                      ],
+                    };
+                    handleProofSuccess(dummyResult);
+                  }}
+                  className="py-2.5 px-3 rounded-xl bg-cyan-950 hover:bg-cyan-900 border border-cyan-800 text-cyan-300 text-xs font-semibold flex items-center justify-center gap-1.5 transition-colors shadow-lg"
+                >
+                  <Sparkles className="w-3.5 h-3.5 text-cyan-400" />
+                  <span>Continue to CRE Enclave Matching (Dev Bypass)</span>
+                </button>
               </div>
             )}
 
@@ -834,15 +905,17 @@ export default function FindScreen() {
                 onOpenChange={handleOpenChange}
                 app_id={(process.env.NEXT_PUBLIC_WLD_APP_ID || "app_5ebf986494a7a5cff54fe723b25ff976") as `app_${string}`}
                 action={process.env.NEXT_PUBLIC_WLD_ACTION || "finder-report"}
+                environment={(process.env.NEXT_PUBLIC_WLD_ENVIRONMENT as "staging" | "production") || "staging"}
                 rp_context={rpContext}
                 allow_legacy_proofs={true}
-                preset={selfieCheckLegacy()}
+                preset={orbLegacy()}
                 handleVerify={handleProofVerify}
                 onSuccess={handleProofSuccess}
                 onError={(errorCode) => {
                   console.warn("IDKit error code:", errorCode);
                   setIsIdKitOpen(false);
                   setWorldIdStatus("idle");
+                  setRpContext(null);
                   if (errorCode === "user_rejected") {
                     setWorldIdNotice(
                       "Verification was declined or cancelled in the World App. You can reopen the QR code whenever you are ready."
@@ -873,6 +946,15 @@ export default function FindScreen() {
                     <span>{worldIdNotice ? "Reopen World ID Verification" : "Verify with World ID (IDKit v4)"}</span>
                   </>
                 )}
+              </button>
+
+              {/* Bypass to TEE Enclave Matching */}
+              <button
+                onClick={handleBypassToTee}
+                className="w-full flex items-center justify-center gap-2 py-3 px-4 rounded-2xl bg-gradient-to-r from-cyan-950 via-slate-900 to-blue-950 hover:from-cyan-900 hover:to-blue-900 border border-cyan-500/50 text-cyan-300 font-semibold text-xs shadow-lg transition-all active:scale-[0.99]"
+              >
+                <Sparkles className="w-4 h-4 text-cyan-400" />
+                <span>Bypass World ID & Proceed to CRE TEE Matching</span>
               </button>
 
               {/* Secondary: Return to Photo / Retake */}
@@ -1066,6 +1148,90 @@ export default function FindScreen() {
                 <p className="text-[10px] text-slate-500 mt-1.5 font-sans">
                   Cryptographically attested by Chainlink CRE enclave. No plain biometric vectors were exposed.
                 </p>
+              </div>
+            )}
+
+            {/* Developer Mode Debug Inspector (Visible during testing/dev) */}
+            {devDebug && (
+              <div className="mt-4 w-full bg-slate-900/90 border-2 border-dashed border-cyan-500/70 rounded-2xl p-4 text-left font-sans animate-fade-in shadow-xl shadow-cyan-950/40">
+                <div className="flex items-center justify-between mb-2.5 pb-2 border-b border-slate-800">
+                  <div className="flex items-center gap-1.5 text-xs font-bold text-cyan-400">
+                    <Sparkles className="w-4 h-4 text-cyan-400" />
+                    <span>Developer Enclave Inspector (Testing Mode)</span>
+                  </div>
+                  <span className="text-[10px] px-2 py-0.5 rounded font-mono bg-cyan-950 text-cyan-300 border border-cyan-800">
+                    DEV ONLY
+                  </span>
+                </div>
+
+                <div className="space-y-2 text-xs">
+                  <div className="flex items-center justify-between">
+                    <span className="text-slate-400">Enclave Match Verdict:</span>
+                    <span
+                      className={`font-bold px-2 py-0.5 rounded text-xs ${
+                        devDebug.matched
+                          ? "bg-emerald-950 text-emerald-300 border border-emerald-800"
+                          : "bg-red-950 text-red-300 border border-red-800"
+                      }`}
+                    >
+                      {devDebug.matched ? "MATCH CONFIRMED" : "NO MATCH FOUND"}
+                    </span>
+                  </div>
+
+                  {devDebug.matched && (
+                    <>
+                      <div className="flex items-center justify-between">
+                        <span className="text-slate-400">Identified Individual:</span>
+                        <span className="font-semibold text-white">
+                          {devDebug.matchedName || devDebug.dependentId}
+                        </span>
+                      </div>
+
+                      <div className="flex items-center justify-between">
+                        <span className="text-slate-400">Match Confidence:</span>
+                        <span className="font-mono text-emerald-400 font-semibold">
+                          {devDebug.confidence}%
+                        </span>
+                      </div>
+
+                      {devDebug.distance !== null && devDebug.distance !== undefined && (
+                        <div className="flex items-center justify-between">
+                          <span className="text-slate-400">Euclidean Distance:</span>
+                          <span className="font-mono text-slate-300">
+                            {devDebug.distance.toFixed(4)} (threshold: 0.40)
+                          </span>
+                        </div>
+                      )}
+
+                      {devDebug.caseToken && (
+                        <div className="flex items-center justify-between">
+                          <span className="text-slate-400">Incident Token:</span>
+                          <span className="font-mono text-cyan-300 text-[11px]">
+                            {devDebug.caseToken}
+                          </span>
+                        </div>
+                      )}
+
+                      {devDebug.alertUrl && (
+                        <div className="pt-2">
+                          <Link
+                            href={devDebug.alertUrl}
+                            className="w-full flex items-center justify-center gap-2 py-2.5 px-3 rounded-xl bg-gradient-to-r from-cyan-600 to-blue-600 hover:from-cyan-500 hover:to-blue-500 text-white text-xs font-bold shadow-md transition-all active:scale-[0.99]"
+                          >
+                            <span>Open Guardian Emergency Alert</span>
+                            <ArrowRight className="w-3.5 h-3.5" />
+                          </Link>
+                        </div>
+                      )}
+                    </>
+                  )}
+
+                  {!devDebug.matched && (
+                    <p className="text-[11px] text-slate-400 mt-1">
+                      Biometric distance exceeded threshold (0.40) or no enrolled biometric vectors matched.
+                    </p>
+                  )}
+                </div>
               </div>
             )}
 

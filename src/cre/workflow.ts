@@ -113,11 +113,18 @@ export async function handlerInTee(
   };
 }
 
+import { exec } from "child_process";
+import { promisify } from "util";
+import fs from "fs";
+import path from "path";
+
+const execAsync = promisify(exec);
+
 /**
  * Generates a deterministic SHA-256 cryptographic attestation receipt
  * representing the enclave execution output.
  */
-function generateEnclaveAttestationHash(
+export function generateEnclaveAttestationHash(
   finderCiphertext: string,
   matchedId: string | null,
   distance: number,
@@ -130,16 +137,88 @@ function generateEnclaveAttestationHash(
 
 /**
  * Orchestrates the Chainlink CRE Confidential Workflow execution.
- * Dispatches candidate ciphertexts to handlerInTee.
+ * Attempts execution via the official Chainlink CRE CLI simulator (cre workflow simulate).
+ * Falls back to isolated in-memory handlerInTee if the simulator binary is unavailable or times out.
  */
 export async function runCreConfidentialMatch(
   finderCiphertext: string,
   candidates: CreCandidate[],
   threshold: number = 0.40
 ): Promise<CreEnclaveOutput> {
+  if (candidates.length > 0) {
+    const tempPayloadFile = path.join(
+      process.cwd(),
+      `.cre_match_${Date.now()}_${Math.random().toString(36).slice(2, 7)}.json`
+    );
+
+    try {
+      const payload = {
+        encrypted_embedding: finderCiphertext,
+        candidates: candidates.map((c) => ({
+          id: c.id,
+          encryptedEmbedding: c.encryptedEmbedding,
+        })),
+      };
+
+      fs.writeFileSync(tempPayloadFile, JSON.stringify(payload));
+
+      const cmd = `cre workflow simulate . --target staging-settings --non-interactive --trigger-index 0 --http-payload "${tempPayloadFile}"`;
+      console.log(`[CRE TEE] Launching CRE CLI simulation for ${candidates.length} candidates...`);
+
+      const { stdout } = await execAsync(cmd, {
+        cwd: process.cwd(),
+        timeout: 25000,
+      });
+
+      const match = stdout.match(/Workflow Simulation Result:\s*\n?\s*"([^"]+)"/);
+      if (match) {
+        const unescaped = match[1].replace(/\\"/g, '"');
+        const parsed = JSON.parse(unescaped);
+        const timestamp = parsed.enclave_timestamp || Date.now();
+        const isMatch = Boolean(parsed.matched);
+        const matchedId = parsed.dependent_id || null;
+        const dist = parsed.euclidean_distance != null ? Number(parsed.euclidean_distance) : null;
+        const confidence = isMatch && dist !== null ? distanceToConfidence(dist) : 0;
+        const executionHash = generateEnclaveAttestationHash(
+          finderCiphertext,
+          matchedId,
+          dist ?? 1.0,
+          timestamp
+        );
+
+        console.log(
+          `[CRE TEE] CLI simulation completed. Matched: ${isMatch}, ID: ${matchedId}, Distance: ${dist}`
+        );
+
+        return {
+          matched: isMatch,
+          matchedDependentId: matchedId,
+          euclideanDistance: dist,
+          confidenceScore: confidence,
+          executionHash,
+          enclaveTimestamp: timestamp,
+          candidateCount: candidates.length,
+        };
+      }
+    } catch (simError) {
+      console.warn(
+        "[CRE TEE] CRE CLI simulation bypassed, using in-memory enclave handler:",
+        simError
+      );
+    } finally {
+      try {
+        if (fs.existsSync(tempPayloadFile)) {
+          fs.unlinkSync(tempPayloadFile);
+        }
+      } catch {}
+    }
+  }
+
+  // Fallback to in-process enclave execution
   return handlerInTee({
     finderEmbeddingCiphertext: finderCiphertext,
     candidates,
     threshold,
   });
 }
+
