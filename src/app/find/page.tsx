@@ -21,7 +21,10 @@ import {
   ScanFace,
   XCircle,
   ExternalLink,
-  ArrowRight
+  ArrowRight,
+  Phone,
+  User,
+  MapPin
 } from "lucide-react";
 import {
   IDKitRequestWidget,
@@ -67,6 +70,11 @@ export default function FindScreen() {
     caseToken?: string | null;
     alertUrl?: string | null;
   } | null>(null);
+
+  // Finder contact details (shared with next-of-kin if matched)
+  const [finderPhone, setFinderPhone] = useState("");
+  const [finderName, setFinderName] = useState("");
+  const [finderLocation, setFinderLocation] = useState("");
 
   // World ID v4 state
   const [isIdKitOpen, setIsIdKitOpen] = useState(false);
@@ -416,7 +424,9 @@ export default function FindScreen() {
         body: JSON.stringify({
           nullifier: nullifierHash,
           encrypted_embedding: ciphertext,
-          location_note: "Reported by verified bystander via Mobile Finder Viewfinder",
+          location_note: finderLocation.trim() || "Reported by verified bystander via Mobile Finder Viewfinder",
+          finder_phone: finderPhone.trim() || null,
+          finder_name: finderName.trim() || null,
           encrypted_photo_url: capturedImage || null,
         }),
       });
@@ -475,7 +485,9 @@ export default function FindScreen() {
         body: JSON.stringify({
           nullifier: verifiedNullifier,
           encrypted_embedding: ciphertext,
-          location_note: "Reported by verified bystander via Mobile Finder Viewfinder",
+          location_note: finderLocation.trim() || "Reported by verified bystander via Mobile Finder Viewfinder",
+          finder_phone: finderPhone.trim() || null,
+          finder_name: finderName.trim() || null,
           encrypted_photo_url: capturedImage || null,
         }),
       });
@@ -549,8 +561,83 @@ export default function FindScreen() {
     setMatchError(null);
     setEnclaveReceipt(null);
     setDevDebug(null);
+    // Note: finderPhone, finderName, finderLocation are preserved so user doesn't have to re-enter
     setIsIdKitOpen(false);
   };
+
+  const renderFinderContactCard = (helperText: string) => (
+    <div className="w-full mt-4 p-4 sm:p-5 rounded-3xl bg-slate-900 border-2 border-cyan-800/70 shadow-xl text-left space-y-3.5 animate-fade-in">
+      <div className="flex items-center justify-between pb-2 border-b border-slate-800">
+        <div className="flex items-center gap-2 text-xs font-bold text-white">
+          <Phone className="w-4 h-4 text-cyan-400" />
+          <span>Your Contact Details (Shared with Family if Matched)</span>
+        </div>
+        <span className="text-[10px] text-cyan-400 font-mono bg-cyan-950 px-2 py-0.5 rounded border border-cyan-800">
+          Confidential Next-of-Kin Contact
+        </span>
+      </div>
+
+      <p className="text-xs text-slate-300 leading-relaxed">
+        {helperText}
+      </p>
+
+      <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+        <div>
+          <label className="text-xs font-semibold text-slate-200 block mb-1">
+            Your Phone Number <span className="text-cyan-400">*</span>
+          </label>
+          <div className="relative">
+            <Phone className="w-4 h-4 text-cyan-500 absolute left-3 top-1/2 -translate-y-1/2" />
+            <input
+              type="tel"
+              value={finderPhone}
+              onChange={(e) => setFinderPhone(e.target.value)}
+              placeholder="e.g. (555) 234-5678"
+              className="w-full bg-slate-950 border border-slate-800 focus:border-cyan-500 rounded-xl pl-9 pr-3 py-2.5 text-xs text-white placeholder:text-slate-500 outline-none transition-colors"
+            />
+          </div>
+          <span className="text-[10px] text-slate-400 mt-1 block">
+            Family receives this to call or SMS you for safe pickup.
+          </span>
+        </div>
+
+        <div>
+          <label className="text-xs font-semibold text-slate-200 block mb-1">
+            Your Name / Role (Optional)
+          </label>
+          <div className="relative">
+            <User className="w-4 h-4 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2" />
+            <input
+              type="text"
+              value={finderName}
+              onChange={(e) => setFinderName(e.target.value)}
+              placeholder="e.g. Alex (Store Clerk / Passerby)"
+              className="w-full bg-slate-950 border border-slate-800 focus:border-cyan-500 rounded-xl pl-9 pr-3 py-2.5 text-xs text-white placeholder:text-slate-500 outline-none transition-colors"
+            />
+          </div>
+          <span className="text-[10px] text-slate-400 mt-1 block">
+            Helps the family identify who they are speaking with.
+          </span>
+        </div>
+      </div>
+
+      <div>
+        <label className="text-xs font-semibold text-slate-200 block mb-1">
+          Sighting Location & Context Notes
+        </label>
+        <div className="relative">
+          <MapPin className="w-4 h-4 text-rose-400 absolute left-3 top-2.5" />
+          <textarea
+            rows={2}
+            value={finderLocation}
+            onChange={(e) => setFinderLocation(e.target.value)}
+            placeholder="e.g. Waiting on bench near Market & 4th Street, wearing green coat..."
+            className="w-full bg-slate-950 border border-slate-800 focus:border-cyan-500 rounded-xl pl-9 pr-3 py-2 text-xs text-white placeholder:text-slate-500 outline-none transition-colors resize-none"
+          />
+        </div>
+      </div>
+    </div>
+  );
 
   return (
     <div className="min-h-screen bg-slate-950 text-slate-100 flex flex-col justify-between font-sans selection:bg-cyan-500 selection:text-white">
@@ -680,6 +767,11 @@ export default function FindScreen() {
                 <span>{isStreaming ? "Take Photo" : "Take Photo / Pick File"}</span>
               </button>
             </div>
+
+            {/* Finder Contact Details & Sighting Notes (Available immediately on Camera screen) */}
+            {renderFinderContactCard(
+              "Enter your contact details below so the family or emergency guardian can reach you directly if a confidential match is confirmed."
+            )}
           </div>
         )}
 
@@ -775,6 +867,11 @@ export default function FindScreen() {
               ) : null}
             </div>
 
+            {/* Finder Contact Details & Sighting Notes (Always visible on Preview) */}
+            {renderFinderContactCard(
+              "Review or update your contact details below. If this person is matched in the enclave, their family receives your phone number to coordinate safe immediate pickup."
+            )}
+
             {/* Action Bar */}
             <div className="w-full mt-4 flex gap-3">
               <button
@@ -832,6 +929,35 @@ export default function FindScreen() {
             <p className="text-xs text-slate-400 mt-3 leading-relaxed max-w-sm">
               To prevent automated bots, mass scraping, and prank reports against vulnerable persons, verify your human uniqueness with World ID.
             </p>
+
+            {/* Attached Contact Confirmation Pill */}
+            <div className="w-full mt-4 p-3.5 rounded-2xl bg-slate-950/80 border border-cyan-900/60 text-left flex items-center justify-between text-xs">
+              <div>
+                <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider block">
+                  Contact Attached to Report
+                </span>
+                <div className="font-semibold text-white mt-0.5 flex items-center gap-1.5">
+                  <Phone className="w-3.5 h-3.5 text-cyan-400" />
+                  {finderPhone ? (
+                    <span className="text-cyan-300 font-mono">{finderPhone} {finderName ? `(${finderName})` : ""}</span>
+                  ) : (
+                    <span className="text-slate-400 font-normal italic">No phone number entered (Anonymous report)</span>
+                  )}
+                </div>
+                {finderLocation && (
+                  <p className="text-[11px] text-slate-400 mt-0.5 truncate max-w-[280px]">
+                    Note: {finderLocation}
+                  </p>
+                )}
+              </div>
+              <button
+                type="button"
+                onClick={() => setCurrentStep("preview")}
+                className="text-xs font-semibold text-cyan-400 hover:text-cyan-300 underline shrink-0 ml-3"
+              >
+                Edit Details
+              </button>
+            </div>
 
             {/* Error or Throttling Banner */}
             {worldIdStatus === "throttled" && (
@@ -1129,6 +1255,16 @@ export default function FindScreen() {
                 <span>Identity protected: no match signals are exposed here.</span>
               </div>
             </div>
+
+            {/* Bystander Contact Reassurance */}
+            {finderPhone && (
+              <div className="mt-3 w-full p-3.5 rounded-2xl bg-emerald-950/40 border border-emerald-800/80 text-left text-xs flex items-center gap-2.5">
+                <Phone className="w-4 h-4 text-emerald-400 shrink-0" />
+                <span className="text-slate-300">
+                  Your phone number (<strong className="text-emerald-300 font-mono">{finderPhone}</strong>) was securely attached to this report. If matched, the family can reach out to you directly.
+                </span>
+              </div>
+            )}
 
             {/* Hardware TEE Attestation Hash */}
             {enclaveReceipt && (

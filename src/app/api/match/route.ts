@@ -10,6 +10,8 @@ export async function POST(request: Request): Promise<Response> {
       nullifier,
       encrypted_embedding,
       location_note,
+      finder_phone,
+      finder_name,
       encrypted_photo_url,
     } = body;
 
@@ -96,13 +98,25 @@ export async function POST(request: Request): Promise<Response> {
     // 5. Handle Match Outcome
     if (enclaveResult.matched && enclaveResult.matchedDependentId) {
       caseToken = `case-${crypto.randomUUID().slice(0, 8)}`;
+
+      // Structure location_note to include verified finder contact details
+      const contactParts: string[] = [];
+      if (finder_name && typeof finder_name === "string" && finder_name.trim()) {
+        contactParts.push(`Finder: ${finder_name.trim()}`);
+      }
+      if (finder_phone && typeof finder_phone === "string" && finder_phone.trim()) {
+        contactParts.push(`Phone: ${finder_phone.trim()}`);
+      }
+      const contactPrefix = contactParts.length > 0 ? `[Contact: ${contactParts.join(" | ")}] ` : "";
+      const fullLocationNote = `${contactPrefix}${location_note?.trim() || "Reported by verified bystander"}`;
+
       const newIncident = {
         dependent_id: enclaveResult.matchedDependentId,
         case_token: caseToken,
         nullifier,
         match_confidence: (enclaveResult.confidenceScore || 95) / 100,
         status: "active" as const,
-        location_note: location_note || "Reported by verified bystander",
+        location_note: fullLocationNote,
         encrypted_photo_url: encrypted_photo_url || null,
       };
 
@@ -128,7 +142,7 @@ export async function POST(request: Request): Promise<Response> {
       );
 
       console.log(
-        `[CRE TEE MATCH] Confirmed match for: ${matchedPerson?.full_name || enclaveResult.matchedDependentId}. Case Token: ${caseToken}. Emergency Phone: ${matchedPerson?.primary_contact_phone || "Unknown"}`
+        `[CRE TEE MATCH] Confirmed match for: ${matchedPerson?.full_name || enclaveResult.matchedDependentId}. Case Token: ${caseToken}. Finder Phone: ${finder_phone || "Not provided"}`
       );
     }
 
@@ -154,6 +168,8 @@ export async function POST(request: Request): Promise<Response> {
           distance: enclaveResult.euclideanDistance,
           caseToken,
           alertUrl: caseToken ? `/alert/${caseToken}` : null,
+          finderPhone: finder_phone || null,
+          finderName: finder_name || null,
         },
       }),
     });

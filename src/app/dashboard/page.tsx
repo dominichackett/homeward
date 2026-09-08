@@ -29,6 +29,9 @@ import {
   LogOut,
   Loader2,
   RefreshCw,
+  UserCheck,
+  MapPin,
+  PhoneCall,
 } from "lucide-react";
 import { getSupabaseBrowserClient } from "@/lib/supabase/client";
 import {
@@ -67,6 +70,7 @@ interface IncidentItem {
   match_confidence: number;
   status: "active" | "resolved";
   location_note: string;
+  nullifier?: string | null;
   encrypted_photo_url?: string | null;
   created_at: string;
   dependents?: {
@@ -1256,6 +1260,15 @@ export default function CaregiverDashboard() {
                   const isResolved = inc.status === "resolved";
                   const dateStr = new Date(inc.created_at).toLocaleString();
 
+                  // Parse finder contact details if included in location_note
+                  const phoneMatch = inc.location_note?.match(/Phone:\s*([^\]|]+)/i);
+                  const finderPhone = phoneMatch ? phoneMatch[1].trim() : null;
+                  const nameMatch = inc.location_note?.match(/Finder:\s*([^|\]]+)/i);
+                  const finderName = nameMatch ? nameMatch[1].trim() : null;
+                  const cleanLocation = inc.location_note
+                    ? inc.location_note.replace(/\[Contact:[^\]]+\]\s*/i, "").trim() || "Reported by verified bystander"
+                    : "Reported by verified bystander";
+
                   return (
                     <div
                       key={inc.id}
@@ -1287,8 +1300,8 @@ export default function CaregiverDashboard() {
                         </div>
                       </div>
 
-                      <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
-                        <div className="space-y-1">
+                      <div className="flex flex-col md:flex-row md:items-start justify-between gap-4">
+                        <div className="space-y-2 flex-1">
                           <div className="flex items-center gap-2">
                             <h4 className="text-base font-bold text-white tracking-tight">
                               {personName}
@@ -1297,9 +1310,39 @@ export default function CaregiverDashboard() {
                               ({inc.case_token})
                             </span>
                           </div>
-                          <p className="text-xs text-slate-300 leading-relaxed">
-                            {inc.location_note}
-                          </p>
+
+                          {/* Bystander on Scene Contact Badge */}
+                          {finderPhone && (
+                            <div className="p-3 rounded-xl bg-emerald-950/50 border border-emerald-800/80 flex flex-wrap items-center justify-between gap-2">
+                              <div className="flex items-center gap-2">
+                                <div className="w-7 h-7 rounded-lg bg-emerald-900/80 text-emerald-300 flex items-center justify-center">
+                                  <UserCheck className="w-4 h-4" />
+                                </div>
+                                <div>
+                                  <div className="text-xs font-bold text-emerald-300">
+                                    Bystander: {finderName || "Verified Bystander"}
+                                  </div>
+                                  <div className="text-[11px] text-slate-300 font-mono flex items-center gap-1">
+                                    <Phone className="w-3 h-3 text-emerald-400" />
+                                    <span>{finderPhone}</span>
+                                  </div>
+                                </div>
+                              </div>
+                              <a
+                                href={`tel:${finderPhone}`}
+                                className="px-3 py-1.5 rounded-lg bg-gradient-to-r from-emerald-500 to-teal-600 hover:from-emerald-400 hover:to-teal-500 text-white font-bold text-xs shadow-sm flex items-center gap-1.5 transition-colors"
+                              >
+                                <PhoneCall className="w-3.5 h-3.5" />
+                                <span>Call Finder</span>
+                              </a>
+                            </div>
+                          )}
+
+                          <div className="flex items-start gap-1.5 text-xs text-slate-300 leading-relaxed">
+                            <MapPin className="w-3.5 h-3.5 text-slate-400 mt-0.5 shrink-0" />
+                            <span>{cleanLocation}</span>
+                          </div>
+
                           <div className="flex items-center gap-2 text-[11px] text-slate-400 font-mono mt-1">
                             <Lock className="w-3 h-3 text-cyan-400" />
                             <span>World ID Nullifier: {inc.nullifier?.slice(0, 16)}... (Verified Human)</span>

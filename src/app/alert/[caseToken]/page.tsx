@@ -91,6 +91,15 @@ export default function EmergencyAlertScreen() {
     ? condMatch[1].trim()
     : dependent?.condition_notes?.split(".")[0] || "Safety Network Enrolled";
 
+  // Extract finder contact info if present in location_note
+  const phoneMatch = incident?.location_note?.match(/Phone:\s*([^\]|]+)/i);
+  const finderPhone = phoneMatch ? phoneMatch[1].trim() : null;
+  const nameMatch = incident?.location_note?.match(/Finder:\s*([^|\]]+)/i);
+  const finderName = nameMatch ? nameMatch[1].trim() : null;
+  const cleanLocation = incident?.location_note
+    ? incident.location_note.replace(/\[Contact:[^\]]+\]\s*/i, "").trim() || "Reported by verified bystander via mobile camera"
+    : "Reported by verified bystander via mobile camera";
+
   const caseData = {
     id: incident?.case_token?.replace("case-", "").toUpperCase() || caseToken.replace("case-", "").toUpperCase(),
     dependentName: fullName,
@@ -105,7 +114,9 @@ export default function EmergencyAlertScreen() {
     timestamp: incident?.created_at
       ? new Date(incident.created_at).toLocaleString()
       : "Recently",
-    locationName: incident?.location_note || "Reported by verified bystander via mobile camera",
+    locationName: cleanLocation,
+    finderPhone,
+    finderName,
     cityState: "GPS Verified Sighting",
     coordinates: "Encrypted Geolocation Tag",
     enclaveExecutionId: "0x" + (incident?.nullifier?.slice(2, 10) || "7f29a") + "...cre41",
@@ -254,6 +265,50 @@ export default function EmergencyAlertScreen() {
                 </div>
               </div>
             </div>
+
+            {/* ==================== BYSTANDER ON SCENE (FINDER CONTACT) ==================== */}
+            {caseData.finderPhone && (
+              <div className="rounded-3xl bg-gradient-to-r from-emerald-950/70 via-slate-900 to-slate-900 border-2 border-emerald-600/70 p-5 shadow-xl flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4 animate-fade-in">
+                <div className="flex items-center gap-3.5">
+                  <div className="w-12 h-12 rounded-2xl bg-emerald-900/60 border border-emerald-500/50 flex items-center justify-center text-emerald-300 shadow-inner shrink-0">
+                    <UserCheck className="w-6 h-6" />
+                  </div>
+                  <div>
+                    <div className="flex items-center gap-2">
+                      <span className="text-xs font-bold uppercase tracking-wider text-emerald-400">
+                        Bystander / Finder on Scene
+                      </span>
+                      <span className="px-2 py-0.5 rounded-full bg-emerald-950 border border-emerald-800 text-[10px] font-mono text-emerald-300">
+                        Direct Contact Available
+                      </span>
+                    </div>
+                    <div className="text-lg font-extrabold text-white mt-0.5">
+                      {caseData.finderName || "Verified Bystander"}
+                    </div>
+                    <div className="text-xs text-slate-300 flex items-center gap-1.5 mt-0.5 font-mono">
+                      <Phone className="w-3.5 h-3.5 text-emerald-400" />
+                      <span>{caseData.finderPhone}</span>
+                    </div>
+                  </div>
+                </div>
+
+                <div className="flex items-center gap-2 w-full sm:w-auto">
+                  <a
+                    href={`tel:${caseData.finderPhone}`}
+                    className="flex-1 sm:flex-initial flex items-center justify-center gap-2 px-5 py-3 rounded-2xl bg-gradient-to-r from-emerald-500 to-teal-600 hover:from-emerald-400 hover:to-teal-500 text-white font-bold text-xs shadow-lg shadow-emerald-500/25 transition-all active:scale-[0.98]"
+                  >
+                    <PhoneCall className="w-4 h-4" />
+                    <span>Call Bystander Now</span>
+                  </a>
+                  <a
+                    href={`sms:${caseData.finderPhone}`}
+                    className="px-4 py-3 rounded-2xl bg-slate-800 hover:bg-slate-750 text-slate-200 border border-slate-700 text-xs font-semibold transition-colors"
+                  >
+                    SMS
+                  </a>
+                </div>
+              </div>
+            )}
 
             {/* ==================== PHOTO & BIOMETRICS COMPARISON ==================== */}
             <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
@@ -407,7 +462,17 @@ export default function EmergencyAlertScreen() {
 
             {/* ==================== ACTION BAR ==================== */}
             <div className="p-5 rounded-3xl bg-slate-900/90 border border-slate-800 flex flex-col sm:flex-row items-center justify-between gap-3 shadow-xl">
-              <div className="flex items-center gap-2 w-full sm:w-auto">
+              <div className="flex flex-wrap items-center gap-2 w-full sm:w-auto">
+                {caseData.finderPhone && (
+                  <a
+                    href={`tel:${caseData.finderPhone}`}
+                    className="flex-1 sm:flex-initial flex items-center justify-center gap-2 px-5 py-3.5 rounded-2xl bg-gradient-to-r from-emerald-500 to-teal-600 hover:from-emerald-400 hover:to-teal-500 text-white font-bold text-xs shadow-lg shadow-emerald-500/25 transition-colors"
+                  >
+                    <PhoneCall className="w-4 h-4" />
+                    <span>Call Finder ({caseData.finderPhone})</span>
+                  </a>
+                )}
+
                 {caseData.emergencyPhone && caseData.emergencyPhone !== "911" && (
                   <a
                     href={`tel:${caseData.emergencyPhone}`}
