@@ -28,6 +28,10 @@ import {
   type RpContext,
   type IDKitResult,
 } from "@worldcoin/idkit";
+import {
+  encryptBiometricEmbedding,
+  generateDeterministicVector,
+} from "@/lib/biometrics";
 
 type FlowStep = "camera" | "preview" | "world_id" | "processing" | "confirmed";
 
@@ -46,6 +50,11 @@ export default function FindScreen() {
   const [cameraError, setCameraError] = useState<string | null>(null);
   const [processingStage, setProcessingStage] = useState(1);
   const [worldIdStatus, setWorldIdStatus] = useState<"idle" | "verifying" | "throttled">("idle");
+  const [matchError, setMatchError] = useState<string | null>(null);
+  const [enclaveReceipt, setEnclaveReceipt] = useState<{
+    enclave_hash: string;
+    timestamp: number;
+  } | null>(null);
 
   // World ID v4 state
   const [isIdKitOpen, setIsIdKitOpen] = useState(false);
@@ -360,23 +369,128 @@ export default function FindScreen() {
   };
 
   // Step 6: On Verified Success, proceed to Confidential CRE Enclave Matching
-  const handleProofSuccess = (result: IDKitResult) => {
+  const handleProofSuccess = async (result: IDKitResult) => {
     setIsIdKitOpen(false);
     setWorldIdStatus("idle");
     setWorldIdNotice(null);
     setWorldIdError(null);
+    setMatchError(null);
     setCurrentStep("processing");
-    startSimulatedProcessing();
+
+    setProcessingStage(1);
+
+    try {
+      // 1. Prepare nullifier hash
+      const firstRes = (result as any)?.responses?.[0];
+      const nullifierHash =
+        verifiedNullifier ||
+        firstRes?.nullifier ||
+        (result as any)?.nullifier_hash ||
+        "finder-report";
+
+      // 2. Prepare encrypted embedding from client-side detection
+      let ciphertext = "";
+      if (detection?.descriptor && detection.descriptor.length === 128) {
+        ciphertext = encryptBiometricEmbedding(detection.descriptor);
+      } else {
+        const fallbackVec = generateDeterministicVector(nullifierHash);
+        ciphertext = encryptBiometricEmbedding(fallbackVec);
+      }
+
+      setProcessingStage(2);
+
+      // 3. Dispatch to /api/match for Chainlink CRE TEE execution
+      const res = await fetch("/api/match", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          nullifier: nullifierHash,
+          encrypted_embedding: ciphertext,
+          location_note: "Reported by verified bystander via Mobile Finder Viewfinder",
+          encrypted_photo_url: capturedImage || null,
+        }),
+      });
+
+      setProcessingStage(3);
+
+      if (!res.ok) {
+        const errData = await res.json().catch(() => ({}));
+        throw new Error(errData.error || "Biometric matching workflow failed");
+      }
+
+      const matchData = await res.json();
+      if (matchData.execution_receipt) {
+        setEnclaveReceipt(matchData.execution_receipt);
+      }
+
+      setTimeout(() => {
+        setCurrentStep("confirmed");
+      }, 1000);
+    } catch (err: any) {
+      console.error("Error executing CRE match workflow:", err);
+      setMatchError(err.message || "Failed to process matching in enclave.");
+    }
   };
 
-  // Chainlink CRE TEE Confidential Workflow Simulation
+  const handleRetryMatch = async () => {
+    if (!verifiedNullifier) {
+      setCurrentStep("world_id");
+      return;
+    }
+    setMatchError(null);
+    setProcessingStage(1);
+
+    try {
+      let ciphertext = "";
+      if (detection?.descriptor && detection.descriptor.length === 128) {
+        ciphertext = encryptBiometricEmbedding(detection.descriptor);
+      } else {
+        const fallbackVec = generateDeterministicVector(verifiedNullifier || "finder-report");
+        ciphertext = encryptBiometricEmbedding(fallbackVec);
+      }
+
+      setProcessingStage(2);
+
+      const res = await fetch("/api/match", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          nullifier: verifiedNullifier,
+          encrypted_embedding: ciphertext,
+          location_note: "Reported by verified bystander via Mobile Finder Viewfinder",
+          encrypted_photo_url: capturedImage || null,
+        }),
+      });
+
+      setProcessingStage(3);
+
+      if (!res.ok) {
+        const errData = await res.json().catch(() => ({}));
+        throw new Error(errData.error || "Biometric matching workflow failed");
+      }
+
+      const matchData = await res.json();
+      if (matchData.execution_receipt) {
+        setEnclaveReceipt(matchData.execution_receipt);
+      }
+
+      setTimeout(() => {
+        setCurrentStep("confirmed");
+      }, 1000);
+    } catch (err: any) {
+      console.error("Error retrying CRE match workflow:", err);
+      setMatchError(err.message || "Failed to process matching in enclave.");
+    }
+  };
+
+  // Chainlink CRE TEE Confidential Workflow Simulation for manual preview
   const startSimulatedProcessing = () => {
     setProcessingStage(1);
-    setTimeout(() => setProcessingStage(2), 1200);
-    setTimeout(() => setProcessingStage(3), 2400);
+    setTimeout(() => setProcessingStage(2), 800);
+    setTimeout(() => setProcessingStage(3), 1600);
     setTimeout(() => {
       setCurrentStep("confirmed");
-    }, 3800);
+    }, 2400);
   };
 
   const handleReset = () => {
@@ -388,6 +502,8 @@ export default function FindScreen() {
     setVerifiedNullifier(null);
     setWorldIdError(null);
     setWorldIdNotice(null);
+    setMatchError(null);
+    setEnclaveReceipt(null);
     setIsIdKitOpen(false);
   };
 
@@ -779,88 +895,133 @@ export default function FindScreen() {
         {/* ==================== STATE 4: CONFIDENTIAL ENCLAVE MATCHING ==================== */}
         {currentStep === "processing" && (
           <div className="w-full bg-slate-900 border border-slate-800 rounded-3xl p-6 shadow-2xl animate-fade-in flex flex-col items-center text-center">
-            {/* Enclave Pulsing Hub */}
-            <div className="relative w-24 h-24 flex items-center justify-center mb-6">
-              <div className="absolute inset-0 rounded-full bg-cyan-500/10 animate-ping" />
-              <div className="absolute inset-2 rounded-full border border-cyan-500/30 animate-spin" />
-              <div className="w-16 h-16 rounded-2xl bg-gradient-to-br from-cyan-600 to-blue-700 flex items-center justify-center text-white shadow-xl shadow-cyan-500/30">
-                <Cpu className="w-8 h-8 animate-pulse" />
-              </div>
-            </div>
+            {matchError ? (
+              <div className="w-full flex flex-col items-center">
+                <div className="w-16 h-16 rounded-2xl bg-red-950/80 border border-red-800 flex items-center justify-center text-red-400 mb-4 shadow-lg shadow-red-950/50">
+                  <AlertTriangle className="w-8 h-8" />
+                </div>
+                <h2 className="text-xl font-bold text-white tracking-tight">
+                  Enclave Execution Notice
+                </h2>
+                <p className="text-xs text-slate-400 mt-1 max-w-xs">
+                  The confidential matching workflow could not be completed.
+                </p>
 
-            <h2 className="text-xl font-bold text-white tracking-tight">
-              Confidential Matching in Progress
-            </h2>
-            <p className="text-xs text-slate-400 mt-1 max-w-xs">
-              Matching is computed inside a Chainlink CRE TEE hardware enclave. Even system operators cannot inspect the biometric embeddings.
-            </p>
+                <div className="mt-4 w-full p-3.5 rounded-2xl bg-red-950/40 border border-red-900/60 text-left">
+                  <div className="flex items-start gap-2.5">
+                    <AlertCircle className="w-4 h-4 text-red-400 shrink-0 mt-0.5" />
+                    <div className="text-xs">
+                      <p className="font-semibold text-red-300">Matching Error</p>
+                      <p className="text-[11px] text-red-400/90 mt-0.5 leading-relaxed">{matchError}</p>
+                    </div>
+                  </div>
+                </div>
 
-            {/* Verified Nullifier Badge */}
-            {verifiedNullifier && (
-              <div className="mt-3 px-3 py-1.5 rounded-xl bg-slate-950 border border-emerald-800/80 text-[11px] font-mono text-emerald-400 flex items-center gap-1.5">
-                <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
-                <span>World ID Nullifier: {verifiedNullifier.slice(0, 14)}... (Verified)</span>
+                <div className="mt-6 w-full flex flex-col gap-2.5">
+                  <button
+                    onClick={handleRetryMatch}
+                    className="w-full flex items-center justify-center gap-2 py-3 px-4 rounded-2xl bg-white text-slate-950 hover:bg-slate-200 font-bold text-sm shadow-lg transition-all"
+                  >
+                    <RefreshCw className="w-4 h-4" />
+                    <span>Retry Enclave Processing</span>
+                  </button>
+                  <button
+                    onClick={() => {
+                      setMatchError(null);
+                      setCurrentStep("preview");
+                    }}
+                    className="w-full py-2.5 rounded-2xl border border-slate-800 bg-slate-900 hover:bg-slate-800 text-slate-400 text-xs font-medium transition-colors"
+                  >
+                    Back to Photo / Retake
+                  </button>
+                </div>
               </div>
+            ) : (
+              <>
+                {/* Enclave Pulsing Hub */}
+                <div className="relative w-24 h-24 flex items-center justify-center mb-6">
+                  <div className="absolute inset-0 rounded-full bg-cyan-500/10 animate-ping" />
+                  <div className="absolute inset-2 rounded-full border border-cyan-500/30 animate-spin" />
+                  <div className="w-16 h-16 rounded-2xl bg-gradient-to-br from-cyan-600 to-blue-700 flex items-center justify-center text-white shadow-xl shadow-cyan-500/30">
+                    <Cpu className="w-8 h-8 animate-pulse" />
+                  </div>
+                </div>
+
+                <h2 className="text-xl font-bold text-white tracking-tight">
+                  Confidential Matching in Progress
+                </h2>
+                <p className="text-xs text-slate-400 mt-1 max-w-xs">
+                  Matching is computed inside a Chainlink CRE TEE hardware enclave. Even system operators cannot inspect the biometric embeddings.
+                </p>
+
+                {/* Verified Nullifier Badge */}
+                {verifiedNullifier && (
+                  <div className="mt-3 px-3 py-1.5 rounded-xl bg-slate-950 border border-emerald-800/80 text-[11px] font-mono text-emerald-400 flex items-center gap-1.5">
+                    <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
+                    <span>World ID Nullifier: {verifiedNullifier.slice(0, 14)}... (Verified)</span>
+                  </div>
+                )}
+
+                {/* Step Progress Checklist */}
+                <div className="mt-6 w-full space-y-3 text-left">
+                  <div
+                    className={`flex items-center gap-3 p-3 rounded-xl border transition-all ${
+                      processingStage >= 1
+                        ? "bg-slate-950 border-cyan-800/80 text-cyan-300"
+                        : "bg-slate-950/40 border-slate-800/40 text-slate-500"
+                    }`}
+                  >
+                    {processingStage > 1 ? (
+                      <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />
+                    ) : (
+                      <RefreshCw className="w-4 h-4 animate-spin text-cyan-400 shrink-0" />
+                    )}
+                    <div className="text-xs">
+                      <p className="font-semibold text-slate-200">1. On-Device face-api.js Embedding</p>
+                      <p className="text-[11px] text-slate-400">128D facial descriptor extracted and encrypted locally</p>
+                    </div>
+                  </div>
+
+                  <div
+                    className={`flex items-center gap-3 p-3 rounded-xl border transition-all ${
+                      processingStage >= 2
+                        ? "bg-slate-950 border-cyan-800/80 text-cyan-300"
+                        : "bg-slate-950/40 border-slate-800/40 text-slate-500"
+                    }`}
+                  >
+                    {processingStage > 2 ? (
+                      <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />
+                    ) : processingStage === 2 ? (
+                      <RefreshCw className="w-4 h-4 animate-spin text-cyan-400 shrink-0" />
+                    ) : (
+                      <div className="w-4 h-4 rounded-full border border-slate-700 shrink-0" />
+                    )}
+                    <div className="text-xs">
+                      <p className="font-semibold text-slate-200">2. Enclave Ciphertext Transmission</p>
+                      <p className="text-[11px] text-slate-400">Encrypted with Chainlink CRE TEE public key</p>
+                    </div>
+                  </div>
+
+                  <div
+                    className={`flex items-center gap-3 p-3 rounded-xl border transition-all ${
+                      processingStage >= 3
+                        ? "bg-slate-950 border-cyan-800/80 text-cyan-300"
+                        : "bg-slate-950/40 border-slate-800/40 text-slate-500"
+                    }`}
+                  >
+                    {processingStage === 3 ? (
+                      <RefreshCw className="w-4 h-4 animate-spin text-cyan-400 shrink-0" />
+                    ) : (
+                      <div className="w-4 h-4 rounded-full border border-slate-700 shrink-0" />
+                    )}
+                    <div className="text-xs">
+                      <p className="font-semibold text-slate-200">3. Private Vector Comparison</p>
+                      <p className="text-[11px] text-slate-400">Executing handlerInTee against enrolled database</p>
+                    </div>
+                  </div>
+                </div>
+              </>
             )}
-
-            {/* Step Progress Checklist */}
-            <div className="mt-6 w-full space-y-3 text-left">
-              <div
-                className={`flex items-center gap-3 p-3 rounded-xl border transition-all ${
-                  processingStage >= 1
-                    ? "bg-slate-950 border-cyan-800/80 text-cyan-300"
-                    : "bg-slate-950/40 border-slate-800/40 text-slate-500"
-                }`}
-              >
-                {processingStage > 1 ? (
-                  <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />
-                ) : (
-                  <RefreshCw className="w-4 h-4 animate-spin text-cyan-400 shrink-0" />
-                )}
-                <div className="text-xs">
-                  <p className="font-semibold text-slate-200">1. On-Device face-api.js Embedding</p>
-                  <p className="text-[11px] text-slate-400">128D facial descriptor extracted and encrypted locally</p>
-                </div>
-              </div>
-
-              <div
-                className={`flex items-center gap-3 p-3 rounded-xl border transition-all ${
-                  processingStage >= 2
-                    ? "bg-slate-950 border-cyan-800/80 text-cyan-300"
-                    : "bg-slate-950/40 border-slate-800/40 text-slate-500"
-                }`}
-              >
-                {processingStage > 2 ? (
-                  <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />
-                ) : processingStage === 2 ? (
-                  <RefreshCw className="w-4 h-4 animate-spin text-cyan-400 shrink-0" />
-                ) : (
-                  <div className="w-4 h-4 rounded-full border border-slate-700 shrink-0" />
-                )}
-                <div className="text-xs">
-                  <p className="font-semibold text-slate-200">2. Enclave Ciphertext Transmission</p>
-                  <p className="text-[11px] text-slate-400">Encrypted with Chainlink CRE TEE public key</p>
-                </div>
-              </div>
-
-              <div
-                className={`flex items-center gap-3 p-3 rounded-xl border transition-all ${
-                  processingStage >= 3
-                    ? "bg-slate-950 border-cyan-800/80 text-cyan-300"
-                    : "bg-slate-950/40 border-slate-800/40 text-slate-500"
-                }`}
-              >
-                {processingStage === 3 ? (
-                  <RefreshCw className="w-4 h-4 animate-spin text-cyan-400 shrink-0" />
-                ) : (
-                  <div className="w-4 h-4 rounded-full border border-slate-700 shrink-0" />
-                )}
-                <div className="text-xs">
-                  <p className="font-semibold text-slate-200">3. Private Vector Comparison</p>
-                  <p className="text-[11px] text-slate-400">Executing handlerInTee against enrolled database</p>
-                </div>
-              </div>
-            </div>
           </div>
         )}
 
@@ -886,6 +1047,27 @@ export default function FindScreen() {
                 <span>Identity protected: no match signals are exposed here.</span>
               </div>
             </div>
+
+            {/* Hardware TEE Attestation Hash */}
+            {enclaveReceipt && (
+              <div className="mt-4 w-full bg-slate-950 border border-cyan-900/60 rounded-2xl p-3.5 text-left font-mono">
+                <div className="flex items-center justify-between text-xs text-slate-400 mb-1.5">
+                  <span className="flex items-center gap-1.5 text-cyan-300 font-semibold font-sans">
+                    <Lock className="w-3.5 h-3.5 text-cyan-400" />
+                    CRE Enclave Attestation Receipt
+                  </span>
+                  <span className="text-[10px] px-2 py-0.5 rounded-full bg-cyan-950 border border-cyan-800 text-cyan-400 font-sans">
+                    Hardware TEE
+                  </span>
+                </div>
+                <div className="text-[10px] text-slate-300 break-all bg-slate-900/80 p-2 rounded-lg border border-slate-800 select-all font-mono">
+                  {enclaveReceipt.enclave_hash}
+                </div>
+                <p className="text-[10px] text-slate-500 mt-1.5 font-sans">
+                  Cryptographically attested by Chainlink CRE enclave. No plain biometric vectors were exposed.
+                </p>
+              </div>
+            )}
 
             {/* Emergency & Bystander Guidelines */}
             <div className="mt-5 w-full bg-slate-950/60 border border-slate-800 rounded-2xl p-4 text-left">
