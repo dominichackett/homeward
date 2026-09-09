@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import crypto from "crypto";
 import { getSupabaseServerClient } from "@/lib/supabase/server";
 import { runCreConfidentialMatch } from "@/cre/workflow";
+import { sendEmergencyMatchEmail } from "@/lib/notifications";
 
 export async function POST(request: Request): Promise<Response> {
   try {
@@ -62,13 +63,15 @@ export async function POST(request: Request): Promise<Response> {
       id: string;
       encryptedEmbedding: string;
       full_name?: string;
+      primary_contact_name?: string;
       primary_contact_phone?: string;
+      primary_contact_email?: string;
     }> = [];
 
     if (supabase) {
       const { data: dependentsData, error: depError } = await supabase
         .from("dependents")
-        .select("id, full_name, encrypted_embedding, primary_contact_phone");
+        .select("id, full_name, encrypted_embedding, primary_contact_name, primary_contact_phone, primary_contact_email");
 
       if (!depError && dependentsData && Array.isArray(dependentsData)) {
         candidates = dependentsData
@@ -77,7 +80,9 @@ export async function POST(request: Request): Promise<Response> {
             id: d.id,
             encryptedEmbedding: d.encrypted_embedding,
             full_name: d.full_name,
+            primary_contact_name: d.primary_contact_name,
             primary_contact_phone: d.primary_contact_phone,
+            primary_contact_email: d.primary_contact_email,
           }));
       }
     }
@@ -144,6 +149,28 @@ export async function POST(request: Request): Promise<Response> {
       console.log(
         `[CRE TEE MATCH] Confirmed match for: ${matchedPerson?.full_name || enclaveResult.matchedDependentId}. Case Token: ${caseToken}. Finder Phone: ${finder_phone || "Not provided"}`
       );
+
+      // 5b. Dispatch Emergency Email Notification to Next-of-Kin via Resend
+      if (matchedPerson?.primary_contact_email) {
+        sendEmergencyMatchEmail({
+          toEmail: matchedPerson.primary_contact_email,
+          recipientName: matchedPerson.primary_contact_name || "Caregiver / Next-of-Kin",
+          dependentName: matchedPerson.full_name || "Enrolled Individual",
+          caseToken: caseToken,
+          matchConfidence: (enclaveResult.confidenceScore || 95) / 100,
+          sightingLocation: location_note || null,
+          finderPhone: finder_phone || null,
+          finderName: finder_name || null,
+          encryptedPhotoUrl: encrypted_photo_url || null,
+          timestamp: Date.now(),
+        }).catch((err) => {
+          console.error("[NOTIFICATIONS] Failed to dispatch Resend email alert:", err);
+        });
+      } else {
+        console.warn(
+          `[NOTIFICATIONS] No primary_contact_email on file for matched individual: ${matchedPerson?.full_name || enclaveResult.matchedDependentId}`
+        );
+      }
     }
 
     const isDev = process.env.NODE_ENV === "development";

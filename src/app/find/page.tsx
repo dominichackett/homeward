@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useState, useRef, useEffect, useCallback } from "react";
+import React, { useState, useRef, useEffect, useCallback, useMemo } from "react";
 import Link from "next/link";
 import {
   Camera,
@@ -38,6 +38,7 @@ import {
   encryptBiometricEmbedding,
   generateDeterministicVector,
 } from "@/lib/biometrics";
+import { getSupabaseBrowserClient } from "@/lib/supabase/client";
 
 type FlowStep = "camera" | "preview" | "world_id" | "processing" | "confirmed";
 
@@ -50,6 +51,46 @@ interface DetectionInfo {
 }
 
 export default function FindScreen() {
+  const [supabaseUserId, setSupabaseUserId] = useState<string | null>(null);
+
+  // Retrieve authenticated Supabase user ID if available
+  useEffect(() => {
+    const supabase = getSupabaseBrowserClient();
+    if (supabase) {
+      supabase.auth.getUser().then(({ data: { user } }) => {
+        if (user?.id) {
+          setSupabaseUserId(user.id);
+        }
+      });
+
+      const {
+        data: { subscription },
+      } = supabase.auth.onAuthStateChange((_event, session) => {
+        if (session?.user?.id) {
+          setSupabaseUserId(session.user.id);
+        } else {
+          setSupabaseUserId(null);
+        }
+      });
+
+      return () => {
+        subscription.unsubscribe();
+      };
+    } else {
+      try {
+        const stored = localStorage.getItem("homeward_caregiver_session");
+        if (stored) {
+          const parsed = JSON.parse(stored);
+          if (parsed?.id) setSupabaseUserId(parsed.id);
+        }
+      } catch {}
+    }
+  }, []);
+
+  const preset = useMemo(
+    () => selfieCheckLegacy(supabaseUserId ? { signal: supabaseUserId } : { signal: "anonymous" }),
+    [supabaseUserId]
+  );
   const [currentStep, setCurrentStep] = useState<FlowStep>("camera");
   const [capturedImage, setCapturedImage] = useState<string | null>(null);
   const [isStreaming, setIsStreaming] = useState(false);
@@ -528,7 +569,7 @@ export default function FindScreen() {
       protocol_version: "4.0",
       nonce: rpContext?.nonce || "0x" + Array.from({ length: 64 }, () => "1").join(""),
       action: process.env.NEXT_PUBLIC_WLD_ACTION || "finder-report",
-      environment: "staging",
+      environment: "sandbox",
       responses: [
         {
           identifier: "orb",
@@ -982,7 +1023,7 @@ export default function FindScreen() {
                       protocol_version: "4.0",
                       nonce: rpContext?.nonce || "0x" + Array.from({ length: 64 }, () => "1").join(""),
                       action: process.env.NEXT_PUBLIC_WLD_ACTION || "finder-report",
-                      environment: "staging",
+                      environment: "sandbox",
                       responses: [
                         {
                           identifier: "orb",
@@ -1031,10 +1072,10 @@ export default function FindScreen() {
                 onOpenChange={handleOpenChange}
                 app_id={(process.env.NEXT_PUBLIC_WLD_APP_ID || "app_5ebf986494a7a5cff54fe723b25ff976") as `app_${string}`}
                 action={process.env.NEXT_PUBLIC_WLD_ACTION || "finder-report"}
-                environment={(process.env.NEXT_PUBLIC_WLD_ENVIRONMENT as "staging" | "production") || "staging"}
+                environment={(process.env.NEXT_PUBLIC_WLD_ENVIRONMENT as "sandbox" | "production") || "sandbox"}
                 rp_context={rpContext}
                 allow_legacy_proofs={true}
-                preset={orbLegacy()}
+                preset={preset}
                 handleVerify={handleProofVerify}
                 onSuccess={handleProofSuccess}
                 onError={(errorCode) => {
