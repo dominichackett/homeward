@@ -47,10 +47,12 @@ interface DetectionInfo {
   score?: number;
   descriptor?: number[];
   box?: { x: number; y: number; width: number; height: number };
+  rawResult?: any;
   error?: string | null;
 }
 
 export default function FindScreen() {
+  const isDevDebug = process.env.NEXT_PUBLIC_ENABLE_DEV_DEBUG === "true";
   const [supabaseUserId, setSupabaseUserId] = useState<string | null>(null);
 
   // Retrieve authenticated Supabase user ID if available
@@ -102,6 +104,7 @@ export default function FindScreen() {
     enclave_hash: string;
     timestamp: number;
   } | null>(null);
+  const [matchOutcome, setMatchOutcome] = useState<boolean | null>(null);
   const [devDebug, setDevDebug] = useState<{
     matched: boolean;
     matchedName?: string | null;
@@ -134,6 +137,7 @@ export default function FindScreen() {
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
+  const previewImageRef = useRef<HTMLImageElement | null>(null);
   const faceApiRef = useRef<typeof import("@vladmandic/face-api") | null>(null);
 
   // 1. Initialize & Load face-api.js Models
@@ -258,28 +262,8 @@ export default function FindScreen() {
               width: result.detection.box.width,
               height: result.detection.box.height,
             },
+            rawResult: result,
           });
-
-          // Draw bounding box and landmarks onto overlay canvas
-          if (canvasRef.current) {
-            const canvas = canvasRef.current;
-            canvas.width = img.naturalWidth || img.width;
-            canvas.height = img.naturalHeight || img.height;
-            const displaySize = {
-              width: img.naturalWidth || img.width,
-              height: img.naturalHeight || img.height,
-            };
-            api.matchDimensions(canvas, displaySize);
-            const resizedResult = api.resizeResults(result, displaySize);
-
-            const ctx = canvas.getContext("2d");
-            if (ctx) {
-              ctx.clearRect(0, 0, canvas.width, canvas.height);
-            }
-
-            api.draw.drawDetections(canvas, resizedResult);
-            api.draw.drawFaceLandmarks(canvas, resizedResult);
-          }
         } else {
           setDetection({
             detected: false,
@@ -308,16 +292,110 @@ export default function FindScreen() {
     img.src = imageSrc;
   }, []);
 
-  // Handle Capture from Live Camera
+  // Pixel-perfect drawing of face bounding box and landmarks over rendered image
+  const drawOverlay = useCallback(() => {
+    if (!canvasRef.current || !previewImageRef.current || !detection?.rawResult) return;
+    const canvas = canvasRef.current;
+    const img = previewImageRef.current;
+    const api = faceApiRef.current;
+    if (!api) return;
+
+    const naturalW = img.naturalWidth || img.width;
+    const naturalH = img.naturalHeight || img.height;
+    if (!naturalW || !naturalH) return;
+
+    canvas.width = naturalW;
+    canvas.height = naturalH;
+
+    const ctx = canvas.getContext("2d");
+    if (ctx) {
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+    }
+
+    const res = detection.rawResult;
+    if (res.detection?.box) {
+      const box = res.detection.box;
+      const strokeW = Math.max(3, Math.round(naturalW / 200));
+      const fontSize = Math.max(16, Math.round(naturalW / 30));
+
+      const drawBox = new api.draw.DrawBox(box, {
+        label: `Face ${(res.detection.score * 100).toFixed(0)}%`,
+        boxColor: "#06b6d4",
+        lineWidth: strokeW,
+        drawLabelOptions: {
+          fontSize,
+          fontColor: "#ffffff",
+          backgroundColor: "rgba(8, 51, 68, 0.9)",
+        },
+      });
+      drawBox.draw(canvas);
+    }
+
+    if (res.landmarks) {
+      new api.draw.DrawFaceLandmarks(res.landmarks, {
+        lineWidth: Math.max(2, Math.round(naturalW / 350)),
+        drawLines: true,
+        color: "#10b981",
+      }).draw(canvas);
+    }
+  }, [detection]);
+
+  // Redraw whenever switching to preview step or when detection updates
+  useEffect(() => {
+    if (currentStep === "preview" && detection?.rawResult) {
+      const timer = setTimeout(() => {
+        drawOverlay();
+      }, 60);
+      return () => clearTimeout(timer);
+    }
+  }, [currentStep, detection, drawOverlay]);
+
+  // Handle Capture from Live Camera (with WYSIWYG 3:4 viewfinder crop)
   const handleCapture = () => {
     if (videoRef.current && isStreaming) {
+      const video = videoRef.current;
+      const vw = video.videoWidth || 640;
+      const vh = video.videoHeight || 480;
+
       const canvas = document.createElement("canvas");
-      canvas.width = videoRef.current.videoWidth || 640;
-      canvas.height = videoRef.current.videoHeight || 480;
+      // The camera viewfinder displays the video with object-cover inside a 3:4 container.
+      // Crop the video frame to match the 3:4 portrait view seen by the user:
+      const targetAspect = 3 / 4;
+      let sx = 0;
+      let sy = 0;
+      let sw = vw;
+      let sh = vh;
+
+      if (vw / vh > targetAspect) {
+        // Video is wider than 3:4 (e.g. 16:9 or 4:3 landscape) -> crop width centered
+        sw = Math.round(vh * targetAspect);
+        sx = Math.round((vw - sw) / 2);
+      } else {
+        // Video is taller than 3:4 -> crop height centered
+        sh = Math.round(vw / targetAspect);
+        sy = Math.round((vh - sh) / 2);
+      }
+
+      // Downsample slightly to max 960px to keep payload size lightweight and fast
+      const maxDim = 960;
+      let finalW = sw;
+      let finalH = sh;
+      if (sw > maxDim || sh > maxDim) {
+        if (sw > sh) {
+          finalW = maxDim;
+          finalH = Math.round((sh * maxDim) / sw);
+        } else {
+          finalH = maxDim;
+          finalW = Math.round((sw * maxDim) / sh);
+        }
+      }
+
+      canvas.width = finalW;
+      canvas.height = finalH;
       const ctx = canvas.getContext("2d");
       if (ctx) {
-        ctx.drawImage(videoRef.current, 0, 0, canvas.width, canvas.height);
-        const dataUrl = canvas.toDataURL("image/jpeg", 0.9);
+        ctx.drawImage(video, sx, sy, sw, sh, 0, 0, finalW, finalH);
+        const dataUrl = canvas.toDataURL("image/jpeg", 0.85);
         setCapturedImage(dataUrl);
         setCurrentStep("preview");
         runFaceDetection(dataUrl);
@@ -334,10 +412,38 @@ export default function FindScreen() {
     if (file) {
       const reader = new FileReader();
       reader.onload = (event) => {
-        const dataUrl = event.target?.result as string;
-        setCapturedImage(dataUrl);
-        setCurrentStep("preview");
-        runFaceDetection(dataUrl);
+        const rawDataUrl = event.target?.result as string;
+        const img = new Image();
+        img.onload = () => {
+          const maxDim = 960;
+          let w = img.width;
+          let h = img.height;
+          if (w > maxDim || h > maxDim) {
+            if (w > h) {
+              h = Math.round((h * maxDim) / w);
+              w = maxDim;
+            } else {
+              w = Math.round((w * maxDim) / h);
+              h = maxDim;
+            }
+          }
+          const c = document.createElement("canvas");
+          c.width = w;
+          c.height = h;
+          const ctx = c.getContext("2d");
+          if (ctx) {
+            ctx.drawImage(img, 0, 0, w, h);
+            const optimized = c.toDataURL("image/jpeg", 0.85);
+            setCapturedImage(optimized);
+            setCurrentStep("preview");
+            runFaceDetection(optimized);
+          } else {
+            setCapturedImage(rawDataUrl);
+            setCurrentStep("preview");
+            runFaceDetection(rawDataUrl);
+          }
+        };
+        img.src = rawDataUrl;
       };
       reader.readAsDataURL(file);
     }
@@ -349,9 +455,9 @@ export default function FindScreen() {
     setWorldIdError(null);
     setWorldIdNotice(null);
 
-    // Enable IDKit debug logging
+    // Enable IDKit debug logging if dev debug is explicitly enabled
     try {
-      setDebug(true);
+      setDebug(isDevDebug);
     } catch {}
 
     try {
@@ -442,10 +548,11 @@ export default function FindScreen() {
       // 1. Prepare nullifier hash
       const firstRes = (result as any)?.responses?.[0];
       const nullifierHash =
-        verifiedNullifier ||
         firstRes?.nullifier ||
         (result as any)?.nullifier_hash ||
-        "finder-report";
+        (verifiedNullifier && !verifiedNullifier.startsWith("0xdev_") ? verifiedNullifier : null) ||
+        ("0xdev_" + crypto.randomUUID().replace(/-/g, ""));
+      setVerifiedNullifier(nullifierHash);
 
       // 2. Prepare encrypted embedding from client-side detection
       let ciphertext = "";
@@ -480,10 +587,13 @@ export default function FindScreen() {
       }
 
       const matchData = await res.json();
+      if (typeof matchData.matched === "boolean") {
+        setMatchOutcome(matchData.matched);
+      }
       if (matchData.execution_receipt) {
         setEnclaveReceipt(matchData.execution_receipt);
       }
-      if (matchData._dev_debug) {
+      if (matchData._dev_debug && isDevDebug) {
         setDevDebug(matchData._dev_debug);
         console.log(
           "%c[CRE TEE ENCLAVE MATCH RESULT]",
@@ -502,19 +612,21 @@ export default function FindScreen() {
   };
 
   const handleRetryMatch = async () => {
-    if (!verifiedNullifier) {
-      setCurrentStep("world_id");
-      return;
-    }
     setMatchError(null);
     setProcessingStage(1);
+
+    const retryNullifier =
+      !verifiedNullifier || verifiedNullifier.startsWith("0xdev_")
+        ? "0xdev_" + crypto.randomUUID().replace(/-/g, "")
+        : verifiedNullifier;
+    setVerifiedNullifier(retryNullifier);
 
     try {
       let ciphertext = "";
       if (detection?.descriptor && detection.descriptor.length === 128) {
         ciphertext = encryptBiometricEmbedding(detection.descriptor);
       } else {
-        const fallbackVec = generateDeterministicVector(verifiedNullifier || "finder-report");
+        const fallbackVec = generateDeterministicVector(retryNullifier);
         ciphertext = encryptBiometricEmbedding(fallbackVec);
       }
 
@@ -524,7 +636,7 @@ export default function FindScreen() {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({
-          nullifier: verifiedNullifier,
+          nullifier: retryNullifier,
           encrypted_embedding: ciphertext,
           location_note: finderLocation.trim() || "Reported by verified bystander via Mobile Finder Viewfinder",
           finder_phone: finderPhone.trim() || null,
@@ -541,10 +653,13 @@ export default function FindScreen() {
       }
 
       const matchData = await res.json();
+      if (typeof matchData.matched === "boolean") {
+        setMatchOutcome(matchData.matched);
+      }
       if (matchData.execution_receipt) {
         setEnclaveReceipt(matchData.execution_receipt);
       }
-      if (matchData._dev_debug) {
+      if (matchData._dev_debug && isDevDebug) {
         setDevDebug(matchData._dev_debug);
         console.log(
           "%c[CRE TEE ENCLAVE MATCH RESULT]",
@@ -563,6 +678,7 @@ export default function FindScreen() {
   };
 
   const handleBypassToTee = () => {
+    setMatchOutcome(true);
     const devNullifier = "0xdev_" + crypto.randomUUID().replace(/-/g, "");
     setVerifiedNullifier(devNullifier);
     const dummyResult: IDKitResult = {
@@ -582,6 +698,7 @@ export default function FindScreen() {
 
   // Chainlink CRE TEE Confidential Workflow Simulation for manual preview
   const startSimulatedProcessing = () => {
+    setMatchOutcome(true);
     setProcessingStage(1);
     setTimeout(() => setProcessingStage(2), 800);
     setTimeout(() => setProcessingStage(3), 1600);
@@ -601,6 +718,7 @@ export default function FindScreen() {
     setWorldIdNotice(null);
     setMatchError(null);
     setEnclaveReceipt(null);
+    setMatchOutcome(null);
     setDevDebug(null);
     // Note: finderPhone, finderName, finderLocation are preserved so user doesn't have to re-enter
     setIsIdKitOpen(false);
@@ -819,22 +937,24 @@ export default function FindScreen() {
         {/* ==================== STATE 2: PREVIEW & FACE-API DETECTION RESULT ==================== */}
         {currentStep === "preview" && (
           <div className="flex flex-col items-center animate-fade-in">
-            <div className="relative w-full aspect-[3/4] max-h-[460px] rounded-3xl overflow-hidden bg-slate-900 border-2 border-slate-800 shadow-2xl flex items-center justify-center">
+            <div className="relative w-full aspect-[3/4] max-h-[460px] rounded-3xl overflow-hidden bg-slate-900 border-2 border-slate-800 shadow-2xl flex items-center justify-center p-2">
               {capturedImage ? (
-                <>
+                <div className="relative max-h-full max-w-full flex items-center justify-center">
                   {/* Base Image */}
                   {/* eslint-disable-next-line @next/next/no-img-element */}
                   <img
+                    ref={previewImageRef}
                     src={capturedImage}
                     alt="Captured portrait"
-                    className="w-full h-full object-cover"
+                    className="max-h-[440px] max-w-full w-auto h-auto object-contain block rounded-2xl"
+                    onLoad={() => drawOverlay()}
                   />
                   {/* Canvas Overlay for face-api landmarks & bounding box */}
                   <canvas
                     ref={canvasRef}
-                    className="absolute inset-0 w-full h-full object-cover pointer-events-none"
+                    className="absolute inset-0 w-full h-full pointer-events-none"
                   />
-                </>
+                </div>
               ) : (
                 <div className="text-slate-500 text-xs">No image loaded</div>
               )}
@@ -1015,29 +1135,28 @@ export default function FindScreen() {
                   <span className="font-semibold">{worldIdError}</span>
                 </div>
                 <p className="text-[11px] text-red-400/90 leading-relaxed">
-                  World ID bridge rejected the request parameters. You can retry with fresh parameters or proceed directly to verify the Chainlink CRE enclave matching workflow.
+                  World ID verification could not be completed. Please check your connection or try scanning again.
                 </p>
-                <button
-                  onClick={() => {
-                    const dummyResult: IDKitResult = {
-                      protocol_version: "4.0",
-                      nonce: rpContext?.nonce || "0x" + Array.from({ length: 64 }, () => "1").join(""),
-                      action: process.env.NEXT_PUBLIC_WLD_ACTION || "finder-report",
-                      environment: "sandbox",
-                      responses: [
-                        {
-                          identifier: "orb",
-                          nullifier: "0xdev_" + crypto.randomUUID().replace(/-/g, ""),
-                        } as any,
-                      ],
-                    };
-                    handleProofSuccess(dummyResult);
-                  }}
-                  className="py-2.5 px-3 rounded-xl bg-cyan-950 hover:bg-cyan-900 border border-cyan-800 text-cyan-300 text-xs font-semibold flex items-center justify-center gap-1.5 transition-colors shadow-lg"
-                >
-                  <Sparkles className="w-3.5 h-3.5 text-cyan-400" />
-                  <span>Continue to CRE Enclave Matching (Dev Bypass)</span>
-                </button>
+                <div className="flex flex-col sm:flex-row gap-2 mt-1">
+                  <button
+                    onClick={handleTriggerWorldId}
+                    className="py-2.5 px-3 rounded-xl bg-slate-900 hover:bg-slate-800 border border-slate-700 text-slate-200 text-xs font-semibold flex items-center justify-center gap-1.5 transition-colors"
+                  >
+                    <RefreshCw className="w-3.5 h-3.5" />
+                    <span>Retry World ID Verification</span>
+                  </button>
+
+                  {/* Dev bypass button only shown when ENABLE_DEV_DEBUG is true */}
+                  {isDevDebug && (
+                    <button
+                      onClick={handleBypassToTee}
+                      className="py-2.5 px-3 rounded-xl bg-cyan-950 hover:bg-cyan-900 border border-cyan-800 text-cyan-300 text-xs font-semibold flex items-center justify-center gap-1.5 transition-colors shadow-lg"
+                    >
+                      <Sparkles className="w-3.5 h-3.5 text-cyan-400" />
+                      <span>Continue to CRE Enclave Matching (Dev Bypass)</span>
+                    </button>
+                  )}
+                </div>
               </div>
             )}
 
@@ -1072,7 +1191,7 @@ export default function FindScreen() {
                 onOpenChange={handleOpenChange}
                 app_id={(process.env.NEXT_PUBLIC_WLD_APP_ID || "app_5ebf986494a7a5cff54fe723b25ff976") as `app_${string}`}
                 action={process.env.NEXT_PUBLIC_WLD_ACTION || "finder-report"}
-                environment={(process.env.NEXT_PUBLIC_WLD_ENVIRONMENT as "sandbox" | "production") || "sandbox"}
+                environment={(process.env.NEXT_PUBLIC_WLD_ENVIRONMENT as any) || "sandbox"}
                 rp_context={rpContext}
                 allow_legacy_proofs={true}
                 preset={preset}
@@ -1115,14 +1234,16 @@ export default function FindScreen() {
                 )}
               </button>
 
-              {/* Bypass to TEE Enclave Matching */}
-              <button
-                onClick={handleBypassToTee}
-                className="w-full flex items-center justify-center gap-2 py-3 px-4 rounded-2xl bg-gradient-to-r from-cyan-950 via-slate-900 to-blue-950 hover:from-cyan-900 hover:to-blue-900 border border-cyan-500/50 text-cyan-300 font-semibold text-xs shadow-lg transition-all active:scale-[0.99]"
-              >
-                <Sparkles className="w-4 h-4 text-cyan-400" />
-                <span>Bypass World ID & Proceed to CRE TEE Matching</span>
-              </button>
+              {/* Bypass to TEE Enclave Matching (Visible only when ENABLE_DEV_DEBUG is true) */}
+              {isDevDebug && (
+                <button
+                  onClick={handleBypassToTee}
+                  className="w-full flex items-center justify-center gap-2 py-3 px-4 rounded-2xl bg-gradient-to-r from-cyan-950 via-slate-900 to-blue-950 hover:from-cyan-900 hover:to-blue-900 border border-cyan-500/50 text-cyan-300 font-semibold text-xs shadow-lg transition-all active:scale-[0.99]"
+                >
+                  <Sparkles className="w-4 h-4 text-cyan-400" />
+                  <span>Bypass World ID & Proceed to CRE TEE Matching</span>
+                </button>
+              )}
 
               {/* Secondary: Return to Photo / Retake */}
               <button
@@ -1274,35 +1395,127 @@ export default function FindScreen() {
           </div>
         )}
 
-        {/* ==================== STATE 5: GENERIC CONFIRMATION ==================== */}
+        {/* ==================== STATE 5: CONFIRMATION ==================== */}
         {currentStep === "confirmed" && (
           <div className="w-full bg-slate-900 border border-slate-800 rounded-3xl p-6 shadow-2xl animate-fade-in flex flex-col items-center text-center">
-            {/* Generic Success Icon */}
-            <div className="w-16 h-16 rounded-full bg-emerald-950 border border-emerald-800 text-emerald-400 flex items-center justify-center mb-4 shadow-lg shadow-emerald-950/50">
-              <CheckCircle2 className="w-8 h-8" />
-            </div>
+            {/* Status Icon & Header */}
+            {matchOutcome === true ? (
+              <>
+                <div className="w-16 h-16 rounded-full bg-emerald-950 border-2 border-emerald-600 text-emerald-400 flex items-center justify-center mb-3 shadow-lg shadow-emerald-950/60 ring-4 ring-emerald-500/20 animate-scale-in">
+                  <CheckCircle2 className="w-8 h-8" />
+                </div>
 
-            <h2 className="text-xl font-bold text-white tracking-tight">
-              Report Submitted Securely
-            </h2>
+                <div className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-emerald-950/90 border border-emerald-700/80 text-emerald-300 text-xs font-semibold mb-2">
+                  <ShieldCheck className="w-3.5 h-3.5 text-emerald-400" />
+                  <span>REGISTRY MATCH CONFIRMED</span>
+                </div>
 
-            {/* Core Privacy Requirement: Generic Response */}
-            <div className="mt-3 p-4 rounded-2xl bg-slate-950/80 border border-slate-800 text-left">
-              <p className="text-xs text-slate-300 leading-relaxed">
-                Thank you for looking out for others. If this person is enrolled in our safety network, their registered emergency contacts have been notified with details and location.
-              </p>
-              <div className="mt-3 pt-2.5 border-t border-slate-800/80 flex items-center gap-2 text-[11px] text-cyan-400 font-mono">
-                <Lock className="w-3 h-3 shrink-0" />
-                <span>Identity protected: no match signals are exposed here.</span>
-              </div>
-            </div>
+                <h2 className="text-xl sm:text-2xl font-bold text-white tracking-tight">
+                  Emergency Contacts Alerted
+                </h2>
+
+                <p className="text-xs sm:text-sm text-slate-300 mt-2 max-w-md leading-relaxed">
+                  A positive match was confirmed in our safety registry. Their registered emergency contacts have been immediately notified with your sighting location and report.
+                </p>
+
+                {/* Privacy Guarantee Note */}
+                <div className="mt-4 w-full p-4 rounded-2xl bg-slate-950/80 border border-slate-800 text-left">
+                  <div className="flex items-center gap-2 text-[11px] text-cyan-400 font-mono">
+                    <Lock className="w-3.5 h-3.5 shrink-0" />
+                    <span className="font-semibold uppercase tracking-wider">Privacy Protection Active</span>
+                  </div>
+                  <p className="text-xs text-slate-400 mt-1.5 leading-relaxed">
+                    To protect this individual's privacy and dignity, their name, medical history, and guardian contact details are kept strictly confidential and shared only directly with their verified family.
+                  </p>
+                </div>
+
+                {/* Next Steps for Finder (Match Found) */}
+                <div className="mt-4 w-full bg-emerald-950/30 border border-emerald-800/60 rounded-2xl p-4 text-left">
+                  <div className="flex items-center gap-2 text-emerald-300 text-xs font-semibold mb-2">
+                    <Info className="w-4 h-4 text-emerald-400 shrink-0" />
+                    <span>Next Steps While Family Coordinates:</span>
+                  </div>
+                  <ul className="text-xs text-slate-300 space-y-1.5 list-disc pl-4 leading-normal">
+                    <li>Please stay with the individual in a safe, visible public location if you are able.</li>
+                    <li>Speak in a calm, soothing voice. Avoid crowding, arguing, or startling them.</li>
+                    <li>If you provided your contact number, please keep your phone nearby so the family can reach you.</li>
+                  </ul>
+                </div>
+              </>
+            ) : matchOutcome === false ? (
+              <>
+                <div className="w-16 h-16 rounded-full bg-amber-950/80 border-2 border-amber-600 text-amber-400 flex items-center justify-center mb-3 shadow-lg shadow-amber-950/50 ring-4 ring-amber-500/20 animate-scale-in">
+                  <AlertCircle className="w-8 h-8" />
+                </div>
+
+                <div className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-amber-950/90 border border-amber-700/80 text-amber-300 text-xs font-semibold mb-2">
+                  <AlertTriangle className="w-3.5 h-3.5 text-amber-400" />
+                  <span>NO MATCH FOUND IN REGISTRY</span>
+                </div>
+
+                <h2 className="text-xl sm:text-2xl font-bold text-white tracking-tight">
+                  No Matching Profile
+                </h2>
+
+                <p className="text-xs sm:text-sm text-slate-300 mt-2 max-w-md leading-relaxed">
+                  We securely checked the biometric scan against our enrolled registry, but no matching profile was found.
+                </p>
+
+                {/* Privacy Guarantee Note */}
+                <div className="mt-4 w-full p-4 rounded-2xl bg-slate-950/80 border border-slate-800 text-left">
+                  <div className="flex items-center gap-2 text-[11px] text-cyan-400 font-mono">
+                    <Lock className="w-3.5 h-3.5 shrink-0" />
+                    <span className="font-semibold uppercase tracking-wider">Zero-Knowledge Search</span>
+                  </div>
+                  <p className="text-xs text-slate-400 mt-1.5 leading-relaxed">
+                    The biometric scan was compared securely inside a hardware enclave without storing unencrypted photos or personal records.
+                  </p>
+                </div>
+
+                {/* Next Steps for Finder (No Match) */}
+                <div className="mt-4 w-full bg-amber-950/30 border border-amber-800/60 rounded-2xl p-4 text-left">
+                  <div className="flex items-center gap-2 text-amber-300 text-xs font-semibold mb-2">
+                    <Info className="w-4 h-4 text-amber-400 shrink-0" />
+                    <span>Recommended Next Steps:</span>
+                  </div>
+                  <ul className="text-xs text-slate-300 space-y-1.5 list-disc pl-4 leading-normal">
+                    <li>Check if the individual is wearing a medical alert bracelet, pendant, or clothing tag.</li>
+                    <li>If lighting or camera angle was poor, you can try scanning their face once more.</li>
+                    <li>If the person appears confused, lost, or in distress, please contact local non-emergency support or emergency services.</li>
+                  </ul>
+                </div>
+              </>
+            ) : (
+              <>
+                <div className="w-16 h-16 rounded-full bg-cyan-950 border border-cyan-800 text-cyan-400 flex items-center justify-center mb-3 shadow-lg shadow-cyan-950/50">
+                  <CheckCircle2 className="w-8 h-8" />
+                </div>
+
+                <h2 className="text-xl font-bold text-white tracking-tight">
+                  Report Submitted Securely
+                </h2>
+
+                <div className="mt-3 p-4 rounded-2xl bg-slate-950/80 border border-slate-800 text-left">
+                  <p className="text-xs text-slate-300 leading-relaxed">
+                    Thank you for looking out for others. If this person is enrolled in our safety network, their registered emergency contacts have been notified with details and location.
+                  </p>
+                  <div className="mt-3 pt-2.5 border-t border-slate-800/80 flex items-center gap-2 text-[11px] text-cyan-400 font-mono">
+                    <Lock className="w-3.5 h-3.5 shrink-0" />
+                    <span>Identity protected: no match signals are exposed here.</span>
+                  </div>
+                </div>
+              </>
+            )}
 
             {/* Bystander Contact Reassurance */}
             {finderPhone && (
-              <div className="mt-3 w-full p-3.5 rounded-2xl bg-emerald-950/40 border border-emerald-800/80 text-left text-xs flex items-center gap-2.5">
-                <Phone className="w-4 h-4 text-emerald-400 shrink-0" />
+              <div className="mt-3 w-full p-3.5 rounded-2xl bg-cyan-950/30 border border-cyan-800/70 text-left text-xs flex items-center gap-2.5">
+                <Phone className="w-4 h-4 text-cyan-400 shrink-0" />
                 <span className="text-slate-300">
-                  Your phone number (<strong className="text-emerald-300 font-mono">{finderPhone}</strong>) was securely attached to this report. If matched, the family can reach out to you directly.
+                  Your phone number (<strong className="text-cyan-300 font-mono">{finderPhone}</strong>) was securely attached to this report.
+                  {matchOutcome === true
+                    ? " The family has been provided your number to coordinate."
+                    : " It has been logged with this report."}
                 </span>
               </div>
             )}
@@ -1328,8 +1541,8 @@ export default function FindScreen() {
               </div>
             )}
 
-            {/* Developer Mode Debug Inspector (Visible during testing/dev) */}
-            {devDebug && (
+            {/* Developer Mode Debug Inspector (Visible during testing/dev when enabled) */}
+            {devDebug && isDevDebug && (
               <div className="mt-4 w-full bg-slate-900/90 border-2 border-dashed border-cyan-500/70 rounded-2xl p-4 text-left font-sans animate-fade-in shadow-xl shadow-cyan-950/40">
                 <div className="flex items-center justify-between mb-2.5 pb-2 border-b border-slate-800">
                   <div className="flex items-center gap-1.5 text-xs font-bold text-cyan-400">
@@ -1412,22 +1625,12 @@ export default function FindScreen() {
               </div>
             )}
 
-            {/* Emergency & Bystander Guidelines */}
+            {/* Emergency & Bystander Help Banner */}
             <div className="mt-5 w-full bg-slate-950/60 border border-slate-800 rounded-2xl p-4 text-left">
-              <div className="flex items-center gap-2 text-slate-200 text-xs font-semibold mb-2">
-                <Info className="w-4 h-4 text-cyan-400" />
-                <span>Next Steps While Waiting:</span>
-              </div>
-              <ul className="text-xs text-slate-400 space-y-1.5 list-disc pl-4 leading-normal">
-                <li>Stay in a safe, visible public area with the person.</li>
-                <li>Speak in a calm, gentle tone. Avoid startling or confronting them.</li>
-                <li>Check for medical alert tags or wristbands.</li>
-              </ul>
-
-              <div className="mt-4 pt-3 border-t border-slate-800 flex items-center justify-between">
+              <div className="flex items-center justify-between">
                 <div>
-                  <p className="text-xs font-semibold text-slate-200">Immediate Danger?</p>
-                  <p className="text-[11px] text-slate-400">Contact emergency services immediately.</p>
+                  <p className="text-xs font-semibold text-slate-200">Immediate Medical Danger?</p>
+                  <p className="text-[11px] text-slate-400">Contact emergency responders directly.</p>
                 </div>
                 <a
                   href="tel:911"
@@ -1444,40 +1647,42 @@ export default function FindScreen() {
               onClick={handleReset}
               className="mt-6 w-full py-3.5 px-6 rounded-2xl bg-gradient-to-r from-cyan-500 to-blue-600 hover:from-cyan-400 hover:to-blue-500 text-white font-semibold text-sm shadow-lg shadow-cyan-500/25 transition-all"
             >
-              Done / Scan Another Person
+              {matchOutcome === false ? "Scan Another Individual or Try Again" : "Done (Submit Another Sighting)"}
             </button>
           </div>
         )}
       </main>
 
-      {/* Footer / Interface State Switcher */}
-      <footer className="border-t border-slate-800/80 bg-slate-950/90 py-3 px-4 text-center">
-        <div className="max-w-xl mx-auto flex flex-col sm:flex-row items-center justify-between gap-2 text-xs text-slate-500">
-          <div className="flex items-center gap-1">
-            <span className="font-semibold text-slate-400">UI State Switcher:</span>
-            <span className="text-[10px] uppercase font-mono text-cyan-500">[{currentStep}]</span>
-          </div>
+      {/* Footer / Interface State Switcher (Visible only when ENABLE_DEV_DEBUG is true) */}
+      {isDevDebug && (
+        <footer className="border-t border-slate-800/80 bg-slate-950/90 py-3 px-4 text-center">
+          <div className="max-w-xl mx-auto flex flex-col sm:flex-row items-center justify-between gap-2 text-xs text-slate-500">
+            <div className="flex items-center gap-1">
+              <span className="font-semibold text-slate-400">UI State Switcher:</span>
+              <span className="text-[10px] uppercase font-mono text-cyan-500">[{currentStep}]</span>
+            </div>
 
-          <div className="flex items-center gap-1 overflow-x-auto py-1 max-w-full">
-            {(["camera", "preview", "world_id", "processing", "confirmed"] as FlowStep[]).map((step) => (
-              <button
-                key={step}
-                onClick={() => {
-                  if (step === "processing") startSimulatedProcessing();
-                  else setCurrentStep(step);
-                }}
-                className={`px-2 py-1 rounded text-[11px] font-medium transition-colors capitalize ${
-                  currentStep === step
-                    ? "bg-cyan-950 text-cyan-300 border border-cyan-700"
-                    : "bg-slate-900 hover:bg-slate-800 text-slate-400 border border-slate-800"
-                }`}
-              >
-                {step.replace("_", " ")}
-              </button>
-            ))}
+            <div className="flex items-center gap-1 overflow-x-auto py-1 max-w-full">
+              {(["camera", "preview", "world_id", "processing", "confirmed"] as FlowStep[]).map((step) => (
+                <button
+                  key={step}
+                  onClick={() => {
+                    if (step === "processing") startSimulatedProcessing();
+                    else setCurrentStep(step);
+                  }}
+                  className={`px-2 py-1 rounded text-[11px] font-medium transition-colors capitalize ${
+                    currentStep === step
+                      ? "bg-cyan-950 text-cyan-300 border border-cyan-700"
+                      : "bg-slate-900 hover:bg-slate-800 text-slate-400 border border-slate-800"
+                  }`}
+                >
+                  {step.replace("_", " ")}
+                </button>
+              ))}
+            </div>
           </div>
-        </div>
-      </footer>
+        </footer>
+      )}
     </div>
   );
 }

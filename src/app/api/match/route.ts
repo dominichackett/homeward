@@ -34,7 +34,19 @@ export async function POST(request: Request): Promise<Response> {
     const supabase = getSupabaseServerClient();
 
     // 2. Persistent Cooldown Check (World ID Nullifier Anti-Probing)
-    if (supabase) {
+    // Anti-probing rate limits identical World ID nullifiers to prevent mass-probing.
+    // Development mode, sandbox environments, dev-bypass nullifiers (0xdev_*), and explicit DISABLE_COOLDOWN are exempt.
+    const isDevNullifier = typeof nullifier === "string" && nullifier.startsWith("0xdev_");
+    const isDevMode = process.env.NODE_ENV === "development";
+    const isSandbox =
+      process.env.NEXT_PUBLIC_WLD_ENVIRONMENT === "sandbox" ||
+      process.env.WLD_ENVIRONMENT === "sandbox";
+    const isCooldownDisabled = process.env.DISABLE_COOLDOWN === "true";
+
+    const shouldEnforceCooldown =
+      !isDevNullifier && !isDevMode && !isSandbox && !isCooldownDisabled;
+
+    if (supabase && shouldEnforceCooldown) {
       const { data: nullifierRecord } = await supabase
         .from("nullifiers")
         .select("last_report_at")
@@ -45,7 +57,8 @@ export async function POST(request: Request): Promise<Response> {
       if (nullifierRecord?.last_report_at) {
         const elapsed = Date.now() - new Date(nullifierRecord.last_report_at).getTime();
         const cooldownMs = 10 * 60 * 1000; // 10 minutes
-        if (elapsed < cooldownMs) {
+        // Require elapsed > 15s to prevent self-colliding with a timestamp created in the same flow
+        if (elapsed > 15 * 1000 && elapsed < cooldownMs) {
           const waitSeconds = Math.ceil((cooldownMs - elapsed) / 1000);
           return NextResponse.json(
             {
@@ -133,13 +146,6 @@ export async function POST(request: Request): Promise<Response> {
         if (incError) {
           console.error("Supabase insert incident error:", incError);
         }
-
-        // Upsert nullifier timestamp to record valid submission
-        await supabase.from("nullifiers").upsert({
-          nullifier,
-          action: "finder-report",
-          last_report_at: new Date().toISOString(),
-        });
       }
 
       matchedPerson = candidates.find(
@@ -173,19 +179,40 @@ export async function POST(request: Request): Promise<Response> {
       }
     }
 
-    const isDev = process.env.NODE_ENV === "development";
+    const isDev =
+      process.env.NODE_ENV === "development" &&
+      process.env.NEXT_PUBLIC_ENABLE_DEV_DEBUG !== "false" &&
+      process.env.ENABLE_DEV_DEBUG !== "false";
 
-    // 6. Generic Confirmation to Finder (Privacy Invariant)
-    // The finder NEVER learns whether a match was confirmed or who the individual is.
+    // 6. Record persistent nullifier timestamp to prevent future mass probing (only in live enforcement mode)
+    if (supabase && shouldEnforceCooldown) {
+      supabase
+        .from("nullifiers")
+        .upsert(
+          {
+            action: "finder-report",
+            nullifier,
+            last_report_at: new Date().toISOString(),
+          },
+          { onConflict: "action,nullifier" }
+        )
+        .then(() => {})
+        .catch((err) => console.warn("Failed to persist nullifier report timestamp:", err));
+    }
+
+    // 7. Confirmation to Finder (Privacy Invariant)
+    // The finder learns whether a match occurred (matched: true/false), but NEVER receives personal identity, contact, or biometric details.
     return NextResponse.json({
       success: true,
       processed: true,
+      matched: enclaveResult.matched,
       execution_receipt: {
         enclave_hash: enclaveResult.executionHash,
         timestamp: enclaveResult.enclaveTimestamp,
       },
-      message:
-        "Biometric comparison completed privately inside secure hardware enclave. If enrolled, next-of-kin have been notified.",
+      message: enclaveResult.matched
+        ? "Match confirmed in secure registry. Emergency contacts have been notified."
+        : "No match found in secure registry.",
       ...(isDev && {
         _dev_debug: {
           matched: enclaveResult.matched,

@@ -33,36 +33,47 @@ export async function POST(request: Request): Promise<Response> {
     const supabase = getSupabaseServerClient();
 
     // 1. Abuse-prevention Throttling check (Section 2 of Homeward spec)
-    // First check persistent Postgres table via Supabase, with in-memory fallback
-    let lastReportTime: number | null = null;
+    const isDevNullifier = typeof nullifier === "string" && nullifier.startsWith("0xdev_");
+    const isDevMode = process.env.NODE_ENV === "development";
+    const isSandbox =
+      process.env.NEXT_PUBLIC_WLD_ENVIRONMENT === "sandbox" ||
+      process.env.WLD_ENVIRONMENT === "sandbox";
+    const isCooldownDisabled = process.env.DISABLE_COOLDOWN === "true";
 
-    if (supabase) {
-      const { data: record, error } = await supabase
-        .from("nullifiers")
-        .select("last_report_at")
-        .eq("action", action)
-        .eq("nullifier", nullifier)
-        .maybeSingle();
+    const shouldEnforceCooldown =
+      !isDevNullifier && !isDevMode && !isSandbox && !isCooldownDisabled;
 
-      if (!error && record?.last_report_at) {
-        lastReportTime = new Date(record.last_report_at).getTime();
+    if (shouldEnforceCooldown) {
+      let lastReportTime: number | null = null;
+
+      if (supabase) {
+        const { data: record, error } = await supabase
+          .from("nullifiers")
+          .select("last_report_at")
+          .eq("action", action)
+          .eq("nullifier", nullifier)
+          .maybeSingle();
+
+        if (!error && record?.last_report_at) {
+          lastReportTime = new Date(record.last_report_at).getTime();
+        }
       }
-    }
 
-    if (!lastReportTime) {
-      lastReportTime = nullifierCache.get(cacheKey) || null;
-    }
+      if (!lastReportTime) {
+        lastReportTime = nullifierCache.get(cacheKey) || null;
+      }
 
-    if (lastReportTime && now - lastReportTime < THROTTLE_WINDOW_MS) {
-      const waitMinutes = Math.ceil((THROTTLE_WINDOW_MS - (now - lastReportTime)) / 60000);
-      return NextResponse.json(
-        {
-          error: "throttled",
-          message: `Repeat reports from this World ID are currently throttled to prevent mass-probing. Please wait ${waitMinutes} minute(s).`,
-          waitMinutes,
-        },
-        { status: 429 }
-      );
+      if (lastReportTime && now - lastReportTime < THROTTLE_WINDOW_MS) {
+        const waitMinutes = Math.ceil((THROTTLE_WINDOW_MS - (now - lastReportTime)) / 60000);
+        return NextResponse.json(
+          {
+            error: "throttled",
+            message: `Repeat reports from this World ID are currently throttled to prevent mass-probing. Please wait ${waitMinutes} minute(s).`,
+            waitMinutes,
+          },
+          { status: 429 }
+        );
+      }
     }
 
     // 2. Forward to World ID Developer Portal API if live credentials are configured
@@ -93,22 +104,8 @@ export async function POST(request: Request): Promise<Response> {
       isVerified = true;
     }
 
-    // 3. Record nullifier timestamp persistently in Supabase and memory fallback
-    if (supabase) {
-      try {
-        await supabase.from("nullifiers").upsert(
-          {
-            action,
-            nullifier,
-            last_report_at: new Date(now).toISOString(),
-          },
-          { onConflict: "action,nullifier" }
-        );
-      } catch (dbErr) {
-        console.warn("Could not persist nullifier to Supabase:", dbErr);
-      }
-    }
-    nullifierCache.set(cacheKey, now);
+    // Note: last_report_at is recorded in /api/match upon report submission,
+    // avoiding race-condition lockouts between verification and matching.
 
     return NextResponse.json({
       success: true,

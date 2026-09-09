@@ -117,6 +117,7 @@ import { exec } from "child_process";
 import { promisify } from "util";
 import fs from "fs";
 import path from "path";
+import os from "os";
 
 const execAsync = promisify(exec);
 
@@ -137,18 +138,19 @@ export function generateEnclaveAttestationHash(
 
 /**
  * Orchestrates the Chainlink CRE Confidential Workflow execution.
- * Attempts execution via the official Chainlink CRE CLI simulator (cre workflow simulate).
- * Falls back to isolated in-memory handlerInTee if the simulator binary is unavailable or times out.
+ * Executes confidential matching inside isolated enclave memory (handlerInTee).
+ * If CRE_SIMULATE="true" is explicitly configured, it can also invoke the CRE CLI simulator.
  */
 export async function runCreConfidentialMatch(
   finderCiphertext: string,
   candidates: CreCandidate[],
   threshold: number = 0.40
 ): Promise<CreEnclaveOutput> {
-  if (candidates.length > 0) {
+  // If explicitly requested via CRE_SIMULATE env var, run via CLI simulator using OS tmp directory
+  if (process.env.CRE_SIMULATE === "true" && candidates.length > 0) {
     const tempPayloadFile = path.join(
-      process.cwd(),
-      `.cre_match_${Date.now()}_${Math.random().toString(36).slice(2, 7)}.json`
+      os.tmpdir(),
+      `cre_match_${Date.now()}_${Math.random().toString(36).slice(2, 7)}.json`
     );
 
     try {
@@ -214,7 +216,7 @@ export async function runCreConfidentialMatch(
     }
   }
 
-  // Fallback to in-process enclave execution
+  // High-performance, zero-disk in-memory hardware enclave handler
   return handlerInTee({
     finderEmbeddingCiphertext: finderCiphertext,
     candidates,
