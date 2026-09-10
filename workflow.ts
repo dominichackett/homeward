@@ -50,7 +50,7 @@ function decryptBiometricEmbedding(ciphertext: string): number[] | null {
 const onHttpTrigger = async (runtime: Runtime<Config>, payload: Record<string, unknown>): Promise<string> => {
   runtime.log("Chainlink CRE: Received confidential match request in TEE enclave.");
   try {
-    runtime.log("Raw payload keys: " + Object.keys(payload || {}).join(", "));
+    runtime.log("Raw payload keys: " + Object.keys(payload || {}).sort().join(", "));
     runtime.log("Raw payload preview: " + JSON.stringify(payload).slice(0, 200));
   } catch {}
 
@@ -115,7 +115,7 @@ const onHttpTrigger = async (runtime: Runtime<Config>, payload: Record<string, u
     matched: isMatch,
     dependent_id: isMatch ? bestMatchId : null,
     euclidean_distance: isMatch ? Math.round(minDistance * 10000) / 10000 : null,
-    enclave_timestamp: Date.now(),
+    enclave_timestamp: typeof body?.timestamp === "number" ? body.timestamp : 0,
   });
 };
 

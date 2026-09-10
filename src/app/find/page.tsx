@@ -137,7 +137,6 @@ export default function FindScreen() {
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
-  const previewImageRef = useRef<HTMLImageElement | null>(null);
   const faceApiRef = useRef<typeof import("@vladmandic/face-api") | null>(null);
 
   // 1. Initialize & Load face-api.js Models
@@ -292,63 +291,81 @@ export default function FindScreen() {
     img.src = imageSrc;
   }, []);
 
-  // Pixel-perfect drawing of face bounding box and landmarks over rendered image
+  // Pixel-perfect drawing of face bounding box and landmarks over captured image
   const drawOverlay = useCallback(() => {
-    if (!canvasRef.current || !previewImageRef.current || !detection?.rawResult) return;
+    if (!canvasRef.current || !capturedImage) return;
     const canvas = canvasRef.current;
-    const img = previewImageRef.current;
     const api = faceApiRef.current;
-    if (!api) return;
 
-    const naturalW = img.naturalWidth || img.width;
-    const naturalH = img.naturalHeight || img.height;
-    if (!naturalW || !naturalH) return;
+    const img = new Image();
+    const render = () => {
+      const naturalW = img.naturalWidth || img.width;
+      const naturalH = img.naturalHeight || img.height;
+      if (!naturalW || !naturalH) return;
 
-    canvas.width = naturalW;
-    canvas.height = naturalH;
+      canvas.width = naturalW;
+      canvas.height = naturalH;
 
-    const ctx = canvas.getContext("2d");
-    if (ctx) {
+      const ctx = canvas.getContext("2d");
+      if (!ctx) return;
+
+      // 1. Draw base photo
       ctx.clearRect(0, 0, canvas.width, canvas.height);
+      ctx.drawImage(img, 0, 0, naturalW, naturalH);
+
+      // 2. Draw face-api detection overlay if available
+      if (detection?.rawResult && api) {
+        try {
+          const res = detection.rawResult;
+          if (res.detection?.box) {
+            const box = res.detection.box;
+            const strokeW = Math.max(3, Math.round(naturalW / 200));
+            const fontSize = Math.max(16, Math.round(naturalW / 30));
+
+            const drawBox = new api.draw.DrawBox(box, {
+              label: `Face ${(res.detection.score * 100).toFixed(0)}%`,
+              boxColor: "#06b6d4",
+              lineWidth: strokeW,
+              drawLabelOptions: {
+                fontSize,
+                fontColor: "#ffffff",
+                backgroundColor: "rgba(8, 51, 68, 0.9)",
+              },
+            });
+            drawBox.draw(canvas);
+          }
+
+          if (res.landmarks) {
+            new api.draw.DrawFaceLandmarks(res.landmarks, {
+              lineWidth: Math.max(2, Math.round(naturalW / 350)),
+              drawLines: true,
+              lineColor: "#10b981",
+              pointColor: "#10b981",
+            }).draw(canvas);
+          }
+        } catch (drawErr) {
+          console.warn("Failed to render face overlay:", drawErr);
+        }
+      }
+    };
+
+    if (img.complete && img.naturalWidth > 0) {
+      render();
+    } else {
+      img.onload = render;
     }
+    img.src = capturedImage;
+  }, [capturedImage, detection]);
 
-    const res = detection.rawResult;
-    if (res.detection?.box) {
-      const box = res.detection.box;
-      const strokeW = Math.max(3, Math.round(naturalW / 200));
-      const fontSize = Math.max(16, Math.round(naturalW / 30));
-
-      const drawBox = new api.draw.DrawBox(box, {
-        label: `Face ${(res.detection.score * 100).toFixed(0)}%`,
-        boxColor: "#06b6d4",
-        lineWidth: strokeW,
-        drawLabelOptions: {
-          fontSize,
-          fontColor: "#ffffff",
-          backgroundColor: "rgba(8, 51, 68, 0.9)",
-        },
-      });
-      drawBox.draw(canvas);
-    }
-
-    if (res.landmarks) {
-      new api.draw.DrawFaceLandmarks(res.landmarks, {
-        lineWidth: Math.max(2, Math.round(naturalW / 350)),
-        drawLines: true,
-        color: "#10b981",
-      }).draw(canvas);
-    }
-  }, [detection]);
-
-  // Redraw whenever switching to preview step or when detection updates
+  // Redraw whenever switching to preview step, when captured image is set, or when detection updates
   useEffect(() => {
-    if (currentStep === "preview" && detection?.rawResult) {
+    if (currentStep === "preview" && capturedImage) {
       const timer = setTimeout(() => {
         drawOverlay();
-      }, 60);
+      }, 30);
       return () => clearTimeout(timer);
     }
-  }, [currentStep, detection, drawOverlay]);
+  }, [currentStep, capturedImage, detection, drawOverlay]);
 
   // Handle Capture from Live Camera (with WYSIWYG 3:4 viewfinder crop)
   const handleCapture = () => {
@@ -937,24 +954,12 @@ export default function FindScreen() {
         {/* ==================== STATE 2: PREVIEW & FACE-API DETECTION RESULT ==================== */}
         {currentStep === "preview" && (
           <div className="flex flex-col items-center animate-fade-in">
-            <div className="relative w-full aspect-[3/4] max-h-[460px] rounded-3xl overflow-hidden bg-slate-900 border-2 border-slate-800 shadow-2xl flex items-center justify-center p-2">
+            <div className="relative w-full aspect-[3/4] max-h-[500px] rounded-3xl overflow-hidden bg-slate-900 border-2 border-slate-800 shadow-2xl shadow-cyan-950/30 flex items-center justify-center">
               {capturedImage ? (
-                <div className="relative max-h-full max-w-full flex items-center justify-center">
-                  {/* Base Image */}
-                  {/* eslint-disable-next-line @next/next/no-img-element */}
-                  <img
-                    ref={previewImageRef}
-                    src={capturedImage}
-                    alt="Captured portrait"
-                    className="max-h-[440px] max-w-full w-auto h-auto object-contain block rounded-2xl"
-                    onLoad={() => drawOverlay()}
-                  />
-                  {/* Canvas Overlay for face-api landmarks & bounding box */}
-                  <canvas
-                    ref={canvasRef}
-                    className="absolute inset-0 w-full h-full pointer-events-none"
-                  />
-                </div>
+                <canvas
+                  ref={canvasRef}
+                  className="w-full h-full object-contain"
+                />
               ) : (
                 <div className="text-slate-500 text-xs">No image loaded</div>
               )}

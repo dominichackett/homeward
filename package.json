@@ -8,7 +8,9 @@
     "start": "next start",
     "lint": "eslint",
     "test:cre": "node scripts/test-cre-workflow.mjs",
-    "cre-compile": "cre-compile"
+    "cre:build": "node scripts/build-cre.mjs",
+    "cre:simulate": "cre workflow simulate . --target staging-settings --non-interactive --trigger-index 0 --http-payload \"{}\"",
+    "cre:deploy": "cre workflow deploy . --target staging-settings"
   },
   "dependencies": {
     "@chainlink/cre-sdk": "^1.19.1",

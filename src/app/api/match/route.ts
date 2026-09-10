@@ -100,15 +100,79 @@ export async function POST(request: Request): Promise<Response> {
       }
     }
 
-    // 4. Execute Chainlink CRE TEE Confidential Workflow (handlerInTee)
-    const enclaveResult = await runCreConfidentialMatch(
-      encrypted_embedding,
-      candidates.map((c) => ({
-        id: c.id,
-        encryptedEmbedding: c.encryptedEmbedding,
-      })),
-      0.40 // Euclidean distance threshold
-    );
+    // 4. Execute Chainlink CRE TEE Confidential Workflow
+    let enclaveResult = null;
+
+    // Check if the CRE CLI simulator (--listen on port 2000) is running
+    const rawUrl = process.env.CRE_SIMULATOR_URL || "http://localhost:2000";
+    const creSimulatorUrl = rawUrl.endsWith("/trigger") ? rawUrl : `${rawUrl.replace(/\/$/, "")}/trigger`;
+    try {
+      const creRes = await fetch(creSimulatorUrl, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          input: {
+            encrypted_embedding,
+            candidates: candidates.map((c) => ({
+              id: c.id,
+              encryptedEmbedding: c.encryptedEmbedding,
+            })),
+            timestamp: Date.now(),
+          },
+        }),
+        signal: AbortSignal.timeout(4000),
+      });
+
+      if (creRes.ok) {
+        const rawText = await creRes.text();
+        let parsed: any = null;
+        try {
+          parsed = JSON.parse(rawText);
+          if (typeof parsed === "string") {
+            parsed = JSON.parse(parsed);
+          }
+        } catch {}
+
+        if (parsed && typeof parsed.matched === "boolean") {
+          const isMatch = Boolean(parsed.matched);
+          const matchedId = parsed.dependent_id || null;
+          const dist = parsed.euclidean_distance != null ? Number(parsed.euclidean_distance) : null;
+          const timestamp = parsed.enclave_timestamp || Date.now();
+          const confidence = isMatch && dist !== null ? Math.max(80, Math.round((1 - dist / 0.40) * 20 + 80)) : 0;
+          const hashDigest = crypto
+            .createHash("sha256")
+            .update(`CRE_SIMULATOR:${encrypted_embedding.slice(0, 32)}:${matchedId}:${dist}:${timestamp}`)
+            .digest("hex");
+
+          console.log(
+            `[CRE SIMULATOR] Live response from ${creSimulatorUrl} -> Matched: ${isMatch}, ID: ${matchedId}, Distance: ${dist}`
+          );
+
+          enclaveResult = {
+            matched: isMatch,
+            matchedDependentId: matchedId,
+            euclideanDistance: dist,
+            confidenceScore: confidence,
+            executionHash: `0x${hashDigest}`,
+            enclaveTimestamp: timestamp,
+            candidateCount: candidates.length,
+          };
+        }
+      }
+    } catch {
+      // CRE simulator not reachable or timed out; will fall back to runCreConfidentialMatch
+    }
+
+    if (!enclaveResult) {
+      enclaveResult = await runCreConfidentialMatch(
+        encrypted_embedding,
+        candidates.map((c) => ({
+          id: c.id,
+          encryptedEmbedding: c.encryptedEmbedding,
+        })),
+        0.40 // Euclidean distance threshold
+      );
+    }
 
     let caseToken: string | null = null;
     let matchedPerson: any = null;
@@ -186,9 +250,8 @@ export async function POST(request: Request): Promise<Response> {
 
     // 6. Record persistent nullifier timestamp to prevent future mass probing (only in live enforcement mode)
     if (supabase && shouldEnforceCooldown) {
-      supabase
-        .from("nullifiers")
-        .upsert(
+      Promise.resolve(
+        supabase.from("nullifiers").upsert(
           {
             action: "finder-report",
             nullifier,
@@ -196,8 +259,9 @@ export async function POST(request: Request): Promise<Response> {
           },
           { onConflict: "action,nullifier" }
         )
-        .then(() => {})
-        .catch((err) => console.warn("Failed to persist nullifier report timestamp:", err));
+      ).catch((err: unknown) => {
+        console.warn("Failed to persist nullifier report timestamp:", err);
+      });
     }
 
     // 7. Confirmation to Finder (Privacy Invariant)
